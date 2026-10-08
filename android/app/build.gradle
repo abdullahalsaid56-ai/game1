@@ -1,10 +1,10 @@
 apply plugin: 'com.android.application'
 
 android {
-    namespace = "com.orbitdash.game"
+    namespace = "com.abdullahalsaid.orbitdash"
     compileSdk = rootProject.ext.compileSdkVersion
     defaultConfig {
-        applicationId "com.orbitdash.game"
+        applicationId "com.abdullahalsaid.orbitdash"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 1

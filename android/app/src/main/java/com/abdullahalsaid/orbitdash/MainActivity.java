@@ -1,4 +1,4 @@
-package com.orbitdash.game;
+package com.abdullahalsaid.orbitdash;
 
 import com.getcapacitor.BridgeActivity;
 

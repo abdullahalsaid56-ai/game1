@@ -13,6 +13,8 @@ Built with **TypeScript + HTML5 Canvas** (no game engine and no image or audio f
 - Handles notches and safe areas, scales to any phone or tablet
 - Works offline. No ads, no tracking, no network access.
 
+Website, privacy policy and support pages are in `docs/`. Store listing text and graphics are in `store/`.
+
 ## Project layout
 
 ```
@@ -47,51 +49,94 @@ Run `npm run sync` after every change to `src/` so the native projects get the n
 
 After changing `assets/icon-only.png` or `assets/splash.png`, run `npm run assets` to regenerate every icon and splash size.
 
-Every push builds an Android debug APK in GitHub Actions (**Actions → Build → Artifacts**). You can install it on an Android phone to test.
+Every push builds the Android app (a downloadable debug APK under **Actions → Build → Artifacts**) and checks that the iOS app compiles.
 
 ---
 
-# Launch checklist
+# Launch guide
 
-### 0. Before anything else
+Ready-made store assets:
+- `store/LISTING.md`: every store field filled in (name, descriptions, keywords, categories, age rating and data-safety answers), ready to copy and paste
+- `store/screenshots/`: screenshots at the exact required sizes for iPhone 6.9", iPad 13" and Android phones
+- `store/graphics/`: Play Store 512px icon, 1024×500 feature graphic, App Store 1024px icon
+- `docs/`: website with the privacy policy and support pages both stores require
 
-1. **Pick your app ID.** Change `appId` in `capacitor.config.ts` from `com.orbitdash.game` to a reverse domain you control, e.g. `com.yourname.orbitdash`. Also change `applicationId` in `android/app/build.gradle` (leave `namespace` as it is) and the bundle identifier in Xcode (App target → Signing & Capabilities). **You can't change it after the first release.**
-2. Check that the name "Orbit Dash" isn't already taken in both stores. If it is, change `appName` in `capacitor.config.ts` and the display name in Xcode and `android/app/src/main/res/values/strings.xml`.
-3. Host `PRIVACY.md` somewhere public (e.g. enable GitHub Pages, or paste it into a free site). Both stores ask for a privacy policy URL.
+App ID (permanent): **`com.abdullahalsaid.orbitdash`**
 
-### 1. Google Play (Android)
+## Step 1: Publish the website (5 min, free)
 
-You'll need a [Google Play Console](https://play.google.com/console) developer account ($25 one-time fee) and [Android Studio](https://developer.android.com/studio).
+1. Merge this branch into `main`.
+2. Make sure the repo is **public** (Settings → General → Danger Zone → Change visibility).
+3. Settings → **Pages** → *Build and deployment* → Source: **Deploy from a branch** → Branch: `main`, folder: **`/docs`** → Save.
+4. After a minute these URLs will be live:
+   - https://abdullahalsaid56-ai.github.io/game1/privacy.html
+   - https://abdullahalsaid56-ai.github.io/game1/support.html
 
-1. `npm run android` → Android Studio opens.
-2. **Build → Generate Signed App Bundle / APK → Android App Bundle**. Create a new upload keystore when asked. **Back up the keystore file and its passwords.** You need them for every future update.
-3. The release `.aab` is written to `android/app/release/`.
-4. In Play Console: **Create app** → fill in the store listing (description, screenshots, feature graphic 1024×500, icon 512×512) → complete the **App content** forms:
-   - Privacy policy: your hosted `PRIVACY.md` URL
-   - Ads: **No**
-   - Data safety: **No data collected or shared**
-   - Content rating questionnaire: likely rated *Everyone / PEGI 3*
-   - Target audience: 13+ is simplest. Selecting under-13 triggers the stricter Families policy.
-5. New personal developer accounts must run a **closed test with at least 12 testers for 14 days** before production access. Upload the `.aab` to the Closed testing track first.
-6. For each update, increase `versionCode` (and `versionName`) in `android/app/build.gradle`.
+The support page sends people to GitHub Issues, so make sure Issues is enabled (Settings → General → Features).
 
-### 2. Apple App Store (iOS)
+## Step 2: Create the developer accounts
 
-You'll need a Mac with Xcode, and an [Apple Developer Program](https://developer.apple.com/programs/) membership ($99/year).
+| | Google Play | Apple App Store |
+|---|---|---|
+| Sign up | https://play.google.com/console/signup | https://developer.apple.com/programs/enroll/ |
+| Cost | $25 once | $99 per year |
+| Needs | Google account, ID verification, a phone number. Choose a **Personal** account unless you have a registered business. | Apple ID with two-factor authentication, ID verification (easiest in the **Apple Developer app** on an iPhone). |
+| Approval time | A few hours to a few days | Usually 1–2 days |
 
-1. `npm run ios` → Xcode opens.
-2. Select the **App** target → **Signing & Capabilities** → choose your Team and set your Bundle Identifier.
-3. In [App Store Connect](https://appstoreconnect.apple.com): **My Apps → + → New App** with the same bundle ID.
+## Step 3: Google Play
+
+Install **[Android Studio](https://developer.android.com/studio)** (free, runs on Windows, Mac and Linux) and **[Node.js 22](https://nodejs.org)**.
+
+```bash
+git clone https://github.com/abdullahalsaid56-ai/game1.git
+cd game1
+npm install
+npm run android        # builds the game and opens it in Android Studio
+```
+
+1. **Test on your phone (optional):** turn on USB debugging on your Android phone, plug it in, and press ▶ Run in Android Studio. You can also install the APK from **GitHub → Actions → Build → latest run → Artifacts**.
+2. **Build the release:** *Build → Generate Signed App Bundle or APK → Android App Bundle → Create new…* keystore.
+   **Back up the `.jks` file and its passwords somewhere safe** (e.g. a password manager). Don't commit it to git. You'll need it for every update.
+3. Choose the **release** build variant. The file appears at `android/app/release/app-release.aab`.
+4. In Play Console: **Create app** → fill in **Store listing** and **App content** from `store/LISTING.md`, then upload the screenshots and graphics.
+5. **Testing → Closed testing → Create track**, upload the `.aab`, and add **at least 12 testers** (friends' Gmail addresses). New personal accounts must keep 12+ testers opted in for **14 days** before they can apply for production.
+6. After the 14 days: **Apply for production access** → once approved, create a Production release with the same `.aab` → **Send for review**.
+
+## Step 4: Apple App Store
+
+Building an iOS app requires **Xcode, which only runs on macOS**. Your options:
+
+- **Borrow a Mac or use one at a library or school.** You only need it for about an hour per release.
+- **Rent a cloud Mac**, e.g. MacinCloud or AWS EC2 Mac.
+- **Build in the cloud without a Mac:** [Codemagic](https://codemagic.io) supports Capacitor and has a free tier. It can build, sign and upload to App Store Connect using an App Store Connect API key.
+
+With a Mac:
+
+```bash
+git clone https://github.com/abdullahalsaid56-ai/game1.git
+cd game1
+npm install
+npm run ios            # builds the game and opens Xcode
+```
+
+1. In Xcode select the **App** target → **Signing & Capabilities** → check *Automatically manage signing* → pick your Team. The bundle ID is already `com.abdullahalsaid.orbitdash`.
+2. Plug in your iPhone and press ▶ to test it on the device.
+3. In [App Store Connect](https://appstoreconnect.apple.com) → **Apps → + → New App**: platform iOS, name, language, bundle ID `com.abdullahalsaid.orbitdash`, SKU `orbitdash001`.
 4. In Xcode choose **Any iOS Device (arm64)** → **Product → Archive** → **Distribute App → App Store Connect → Upload**.
-5. In App Store Connect add screenshots (6.9" iPhone at minimum; 13" iPad if you keep iPad support), a description, keywords, support URL and privacy policy URL. Set **App Privacy** to *Data Not Collected*, then answer the age rating questions (likely 4+).
-6. Optionally test with TestFlight first, then **Submit for Review**.
-7. For each update, increase *Version* and *Build* in the App target's General tab.
+5. In App Store Connect fill in everything from `store/LISTING.md`, upload the `iphone-6.9-*` and `ipad-13-*` screenshots, set **App Privacy → Data Not Collected**, select the uploaded build → **Add for Review** → **Submit**.
+6. Review usually takes 1–3 days. If you're rejected, the message explains why, and most fixes are small.
 
-> Apple sometimes rejects very simple games under guideline 4.2 (minimum functionality). The game's polish, haptics and progression help. Adding Game Center leaderboards (e.g. with the `@capacitor-community/game-center` plugin, or a similar one) makes approval even more likely and helps players stick around.
+> Apple occasionally rejects very simple games under guideline 4.2 (minimum functionality). If that happens, adding Game Center leaderboards is the usual fix.
 
-### Screenshots
+## Releasing updates
 
-Run `npm run dev`, open the page in Chrome DevTools device mode at the required size (e.g. 1290×2796 for iPhone 6.9"), play a bit, and capture the screen. Or take them on a real device or simulator.
+1. Change the code, then run `npm run sync`.
+2. Android: increase `versionCode` (e.g. 1 → 2) and `versionName` in `android/app/build.gradle`, build a new signed bundle **with the same keystore**, and upload it.
+3. iOS: increase *Version* and *Build* in Xcode (App target → General), then archive and upload.
+
+## Regenerating store screenshots
+
+Run `npm run dev` and open the page in Chrome DevTools device mode at the target size (e.g. 430×932 at 3× for iPhone 6.9"), play, and capture the screen with DevTools' *Capture screenshot*.
 
 ## Ideas for next versions
 

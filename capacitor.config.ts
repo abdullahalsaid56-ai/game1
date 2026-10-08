@@ -1,9 +1,8 @@
 import type { CapacitorConfig } from '@capacitor/cli';
 
-// IMPORTANT: change appId to a reverse-domain ID you own before publishing
-// (e.g. com.yourname.orbitdash). It cannot be changed after the first store release.
+// The app ID is permanent once the app is published in either store.
 const config: CapacitorConfig = {
-  appId: 'com.orbitdash.game',
+  appId: 'com.abdullahalsaid.orbitdash',
   appName: 'Orbit Dash',
   webDir: 'dist',
   backgroundColor: '#0b0d1f',
