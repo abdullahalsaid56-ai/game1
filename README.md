@@ -20,6 +20,12 @@ Built with **TypeScript + HTML5 Canvas** (no game engine and no image or audio f
   | Black Hole | Orbits shrink as you go; rocks drift towards you |
   | Pulsar | Comet storm. **Boss: Laser UFO** |
 - **Bosses** (20 s each, survive to win +10 gems): the **Space Worm** circles against you and only changes orbit on the far side of the planet, so it's always dodgeable; the **Laser UFO** fires beams across one orbit, each marked by a dashed red line first
+- **Galaxy map (meta-game):** planets you reach in a run are discovered on the map; build a **station** on each one. Stations earn gems per hour **even while the app is closed**, but their storage fills after 8 hours, so players come back to collect. Upgrade stations (10 levels) for more income.
+- **Welcome back:** returning players get a popup with what their stations earned, with an optional rewarded ad to double it.
+- **Hangar:** permanent upgrades bought with gems: Starter Shield, Stronger Magnet, Lucky Finds (more power-ups), Gem Polisher (double gems), Combo Saver.
+- **Daily reward streak:** 7 days of growing rewards (20 → 200 gems); missing a day resets the streak.
+- **Pilot rank:** XP from every run; each rank-up pays gems.
+- **Reminder notifications** (local, on-device): "your stations are full" and "your daily reward is ready". Permission is asked the first time the player builds a station, not at launch.
 - **Missions** (3 at a time, getting harder) that reward gems
 - **Skins shop:** spend gems on 6 ships with unique trails
 - First-run tutorial hint, sound toggle, pause, auto-pause in the background, Android back button
@@ -39,6 +45,7 @@ src/
   profile.ts   saved progress (best, gems, skins, missions)
   ui.ts        canvas drawing helpers (buttons, icons, bars)
   monetize.ts  AdMob ads + Remove Ads purchase (ad IDs live here)
+  meta.ts      galaxy stations, hangar upgrades, daily streak, pilot rank
   audio.ts     synthesized sound effects (Web Audio)
   native.ts    Capacitor plugins: haptics, storage, status bar, lifecycle
 assets/        source icon and splash images (used to generate native assets)

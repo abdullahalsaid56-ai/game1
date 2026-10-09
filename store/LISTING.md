@@ -26,6 +26,9 @@ Simple to learn, hard to master. It's perfect for a quick break.
 FEATURES
 • One-tap controls: play with a single thumb
 • Planet hopping: warp between 6 worlds, each with its own twist: erupting solar flares on Lava World, slippery orbits on Ice World, three orbits around the Gas Giant, shrinking orbits at the Black Hole, and a comet storm at the Pulsar
+• Build your galaxy: claim every planet you reach and build space stations that earn gems even while you're away
+• Hangar upgrades: make your ship permanently stronger
+• Daily rewards and a 7-day streak, plus pilot ranks to climb
 • Boss fights: outlast the Space Worm and the Laser UFO for big rewards
 • Warp flights: dodge debris as you race between planets
 • Power-ups: Shield, Gem Magnet, Slow-Mo and Double Points
@@ -54,7 +57,7 @@ Can you make it past the Pulsar?
 | Secondary category | Games → Casual |
 | Price | Free |
 | Keywords (100) | `arcade,one tap,space,planet,galaxy,dodge,reflex,casual,endless,offline,hyper casual,gems` |
-| Promotional text (170) | Hop between 6 planets, fight a Space Worm and a Laser UFO, and chase your best score, all with just one tap! |
+| Promotional text (170) | Hop between 6 planets, beat the bosses and build a galaxy of stations that earn gems even while you're away. All with one tap! |
 | Copyright | 2026 Abdullah Alsaid |
 
 **Screenshots** (in `store/screenshots/`):
@@ -68,7 +71,7 @@ Can you make it past the Pulsar?
 - Reference name: `Remove Ads`, Product ID: **`remove_ads`** (must match exactly)
 - Price: $1.99 (Tier 2 or the price you choose)
 - Display name: `Remove Ads`, Description: `Removes all ads between games.`
-- Add a screenshot of the Shop screen (`store/screenshots/iphone-6.9-5-skins.png`) for review
+- Add a screenshot of the Shop screen (`store/screenshots/iphone-6.9-6-shop.png`) for review
 - You must accept the **Paid Apps Agreement** (Business section) and add bank/tax info before in-app purchases work
 
 **App Privacy** (because of Google AdMob). Check these against Google's current guide: https://developers.google.com/admob/ios/privacy/data-disclosure
