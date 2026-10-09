@@ -41,9 +41,39 @@ export const THEMES: Theme[] = [
   { name: 'Teal Nebula', bgTop: '#06141c', bgBottom: '#0b3140', planet: ['#9ff7ea', '#2bb3a3', '#0d4a52'], glow: '43, 179, 163' },
   { name: 'Crimson Belt', bgTop: '#1a070d', bgBottom: '#3d0f1d', planet: ['#ffb3a7', '#e0475a', '#5c1426'], glow: '224, 71, 90' },
   { name: 'Solar Gate', bgTop: '#1a1206', bgBottom: '#3d2a0b', planet: ['#fff0a8', '#f2a93b', '#6b3a0d'], glow: '242, 169, 59' },
-  { name: 'Emerald Void', bgTop: '#04140c', bgBottom: '#0b3a22', planet: ['#b8ffd0', '#36c27a', '#0c4a2a'], glow: '54, 194, 122' },
+  { name: 'Event Horizon', bgTop: '#050508', bgBottom: '#1a1024', planet: ['#000000', '#000000', '#000000'], glow: '255, 150, 60' },
   { name: 'Pink Pulsar', bgTop: '#170616', bgBottom: '#3b0d3a', planet: ['#ffc2f2', '#e04fc2', '#560f4b'], glow: '224, 79, 194' },
 ];
+
+// ------------------------------------------------------------------ planets
+
+/** What makes each planet play differently. */
+export type Twist = 'none' | 'flares' | 'ice' | 'three' | 'drift' | 'comets';
+export type PlanetStyle = 'rocky' | 'lava' | 'ice' | 'gas' | 'blackhole' | 'pulsar';
+export type BossKind = 'worm' | 'ufo';
+
+export interface Planet {
+  name: string;
+  theme: Theme;
+  twist: Twist;
+  style: PlanetStyle;
+  hint: string;
+  boss?: BossKind; // fought at the end of this planet, before the warp gate
+}
+
+export const PLANETS: Planet[] = [
+  { name: 'Home', theme: THEMES[0], twist: 'none', style: 'rocky', hint: 'Reach the warp gate!' },
+  { name: 'Lava World', theme: THEMES[2], twist: 'flares', style: 'lava', hint: 'Solar flares erupt as you pass' },
+  { name: 'Ice World', theme: THEMES[1], twist: 'ice', style: 'ice', hint: 'Slippery orbits: switch early', boss: 'worm' },
+  { name: 'Gas Giant', theme: THEMES[3], twist: 'three', style: 'gas', hint: 'Three orbits: taps bounce in and out' },
+  { name: 'Black Hole', theme: THEMES[4], twist: 'drift', style: 'blackhole', hint: 'Orbits shrink, rocks drift in' },
+  { name: 'Pulsar', theme: THEMES[5], twist: 'comets', style: 'pulsar', hint: 'Comet storm!', boss: 'ufo' },
+];
+
+export const BOSSES: Record<BossKind, { name: string; color: string }> = {
+  worm: { name: 'SPACE WORM', color: '#b36bff' },
+  ufo: { name: 'LASER UFO', color: '#ff5d5d' },
+};
 
 // ------------------------------------------------------------------ power-ups
 
@@ -69,6 +99,8 @@ export interface RunStats {
   shieldSaves: number;
   maxMultiplier: number;
   comets: number;
+  planets: number; // planets reached this run (starts at 1)
+  bosses: number;
 }
 
 interface MissionDef {
@@ -88,6 +120,8 @@ const MISSION_DEFS: MissionDef[] = [
   { type: 'shield', perRun: false, describe: (n) => `Survive ${n} hits with a shield`, target: (l) => 2 + l, stat: (s) => s.shieldSaves },
   { type: 'multiplier', perRun: true, describe: (n) => `Reach a x${n} multiplier`, target: (l) => Math.min(5, 3 + Math.floor(l / 2)), stat: (s) => s.maxMultiplier },
   { type: 'comets', perRun: false, describe: (n) => `Dodge ${n} comets`, target: (l) => 5 + l * 3, stat: (s) => s.comets },
+  { type: 'planets', perRun: true, describe: (n) => `Reach planet ${n} in one run`, target: (l) => Math.min(9, 2 + Math.ceil(l / 2)), stat: (s) => s.planets },
+  { type: 'bosses', perRun: false, describe: (n) => (n === 1 ? 'Defeat a boss' : `Defeat ${n} bosses`), target: (l) => 1 + Math.floor(l / 3), stat: (s) => s.bosses },
 ];
 
 function defOf(type: string): MissionDef {

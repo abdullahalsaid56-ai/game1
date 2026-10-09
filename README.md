@@ -1,6 +1,6 @@
 # Orbit Dash
 
-A one-tap arcade game for iOS and Android. Your ship orbits a planet. **Tap to jump between the inner and outer orbit**, dodge rocks and comets, grab gems and power-ups, complete missions and unlock new ships.
+A one-tap arcade game for iOS and Android. Your ship orbits a planet. **Tap to jump between the inner and outer orbit**, hop between six planets through warp gates, survive boss fights, grab gems and power-ups, complete missions and unlock new ships.
 
 Built with **TypeScript + HTML5 Canvas** (no game engine and no image or audio files: all graphics are drawn in code and all sounds are synthesized) and packaged as native apps with **[Capacitor](https://capacitorjs.com)**.
 
@@ -10,7 +10,16 @@ Built with **TypeScript + HTML5 Canvas** (no game engine and no image or audio f
 - **Power-ups:** Shield (absorbs one hit), Magnet (pulls in gems from both orbits), Slow-Mo, Double Points
 - **Combo multiplier** up to x5 for chaining gems, plus **close-call** bonuses for last-second dodges
 - **Comets** that fly at you, with a warning marker where they'll cross your path
-- **Zones:** the planet and sky change color as you progress, and the ship speeds up
+- **Planet hopping:** each planet ends with a **warp gate**; flying through it starts a short **warp flight** (dodge debris left/right) to the next planet. The ship gets faster on every planet, and the six planets loop.
+  | Planet | Twist |
+  |---|---|
+  | Home | Classic rocks |
+  | Lava World | Solar flares: wide hazards that glow as a warning, then erupt as you pass |
+  | Ice World | Slippery, slower orbit switching. **Boss: Space Worm** |
+  | Gas Giant | Three orbits; each tap bounces one orbit in or out (arrow shows the direction) |
+  | Black Hole | Orbits shrink as you go; rocks drift towards you |
+  | Pulsar | Comet storm. **Boss: Laser UFO** |
+- **Bosses** (20 s each, survive to win +10 gems): the **Space Worm** circles against you and only changes orbit on the far side of the planet, so it's always dodgeable; the **Laser UFO** fires beams across one orbit, each marked by a dashed red line first
 - **Missions** (3 at a time, getting harder) that reward gems
 - **Skins shop:** spend gems on 6 ships with unique trails
 - First-run tutorial hint, sound toggle, pause, auto-pause in the background, Android back button

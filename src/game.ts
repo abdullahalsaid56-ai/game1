@@ -1,13 +1,16 @@
 import { Sfx } from './audio';
 import {
+  BOSSES,
+  PLANETS,
   POWERS,
   POWER_KINDS,
   SKINS,
-  THEMES,
   describeMission,
   newMission,
   skinById,
   updateMissions,
+  type BossKind,
+  type Planet,
   type PowerKind,
   type RunStats,
   type Theme,
@@ -21,7 +24,8 @@ import { FONT, button, gemAmount, gemIcon, hit, powerIcon, progressBar, roundRec
 // World units: the outer orbit has radius 1. Everything is scaled to the
 // screen at render time, so gameplay is identical on every device size.
 // ---------------------------------------------------------------------------
-const LANE_R = [0.62, 1.0];
+const TWO_LANES = [0.62, 1.0];
+const THREE_LANES = [0.5, 0.75, 1.0];
 const PLAYER_R = 0.055;
 const ROCK_R = 0.065;
 const GEM_R = 0.05;
@@ -29,7 +33,19 @@ const POWER_R = 0.06;
 const COMET_R = 0.06;
 const SPAWN_LEAD = 2.7; // radians ahead of the player where objects appear
 const LANE_EASE = 22; // higher = faster lane switch
-const POINTS_PER_LEVEL = 20;
+const ICE_EASE = 7; // slippery lane switches on the ice planet
+const STAGE_LEN = 24; // un-multiplied points needed to finish a planet
+const FLARE_W = 0.14; // half-width (radians) of a solar flare
+const GATE_R = 0.1;
+const DRIFT_SPEED = 0.35; // black hole: rocks drift towards the player
+const WARP_DUR = 4.6; // seconds of warp flight between planets
+const WARP_Y = 0.55; // ship's screen position during warp (world units below centre)
+const WARP_X = 0.32; // corridor lane offset
+const BOSS_DUR = 20;
+const BOSS_INTRO = 2.2;
+const WORM_SPEED = 1.6; // radians / second, against the player
+const WORM_SEGS = 13;
+const WORM_SPACING = 0.09;
 const BASE_SPEED = 1.6; // radians / second
 const SPEED_PER_LEVEL = 0.22;
 const MAX_SPEED = 3.7;
@@ -40,11 +56,25 @@ const MAX_MULT = 5;
 const CLOSE_CALL = 0.45; // radians: switching away this close to a hazard counts as a close call
 
 type State = 'menu' | 'shop' | 'missions' | 'playing' | 'paused' | 'over';
-type Kind = 'rock' | 'gem' | 'comet' | 'power';
+type Kind = 'rock' | 'gem' | 'comet' | 'power' | 'flare' | 'beam' | 'gate';
+/** Phases of a run on each planet. */
+type Phase = 'stage' | 'bossIntro' | 'boss' | 'gate' | 'warp';
+
+interface Boss {
+  kind: BossKind;
+  t: number; // seconds into the fight
+  // worm
+  headA: number;
+  headLane: number;
+  startLane: number; // lane of body segments that haven't reached any switch point
+  switches: { a: number; lane: number }[];
+  segR: number[]; // current radius of each segment (eases between orbits)
+  prevD: number;
+}
 
 interface Obj {
   a: number; // absolute (unwrapped) angle
-  lane: 0 | 1;
+  lane: number;
   kind: Kind;
   power: PowerKind;
   vel: number; // angular velocity (comets move towards the player)
@@ -57,6 +87,8 @@ interface Obj {
   fly: number; // >= 0 while being pulled in by the magnet
   fx: number;
   fy: number;
+  y: number; // warp flight only: vertical position in the corridor
+  armed: boolean; // flares and beams: currently deadly
 }
 
 interface Particle {
@@ -90,10 +122,12 @@ interface Btn extends Rect {
   id: string;
 }
 
-const isHazard = (o: Obj) => o.kind === 'rock' || o.kind === 'comet';
+const isHazard = (o: Obj) => o.kind === 'rock' || o.kind === 'comet' || o.kind === 'flare' || o.kind === 'beam';
+const TAU = Math.PI * 2;
+const wrap = (a: number) => ((a % TAU) + TAU) % TAU;
 
 function emptyStats(): RunStats {
-  return { score: 0, gems: 0, dodges: 0, powerups: 0, shieldSaves: 0, maxMultiplier: 1, comets: 0 };
+  return { score: 0, gems: 0, dodges: 0, powerups: 0, shieldSaves: 0, maxMultiplier: 1, comets: 0, planets: 1, bosses: 0 };
 }
 
 export class Game {
@@ -111,8 +145,12 @@ export class Game {
 
   // player
   private angle = -Math.PI / 2;
-  private lane: 0 | 1 = 1;
-  private radius = LANE_R[1];
+  private lane = 1;
+  private laneDir = -1; // gas giant: next tap moves inward (-1) or outward (+1)
+  private lanes = TWO_LANES;
+  private shrink = 1; // black hole: orbits shrink over the planet
+  private radius = TWO_LANES[1];
+  private warpX = WARP_X;
   private speed = BASE_SPEED;
   private trail: { x: number; y: number }[] = [];
   private shield = false;
@@ -129,15 +167,21 @@ export class Game {
   private mult = 1;
   private gameTime = 0; // slowed by slow-mo
   private lastSwitchAngle = -99;
-  private lastSwitchFrom: 0 | 1 = 1;
+  private lastSwitchFrom = 1;
   private switches = 0;
   private stats: RunStats = emptyStats();
   private banked: number[] = [];
   private newBest = false;
   private overTime = 0;
-  private zone = 0;
-  private prevZone = 0;
+  private planetIdx = 0;
+  private prevPlanet = 0;
   private zoneFade = 1;
+  private phase: Phase = 'stage';
+  private stageEnd = STAGE_LEN;
+  private phaseT = 0; // seconds in the current phase
+  private boss: Boss | null = null;
+  private gate: Obj | null = null;
+  private warpNext = 0; // warp: time of next debris spawn
   private banner = { title: '', sub: '', life: 0 };
   private toast = { text: '', color: '#fff', life: 0 };
 
@@ -457,7 +501,10 @@ export class Game {
     this.trail = [];
     this.angle = -Math.PI / 2;
     this.lane = 1;
-    this.radius = LANE_R[1];
+    this.lanes = TWO_LANES;
+    this.shrink = 1;
+    this.laneDir = -1;
+    this.radius = TWO_LANES[1];
     this.speed = BASE_SPEED;
     this.score = 0;
     this.level = 0;
@@ -477,8 +524,13 @@ export class Game {
     this.reviving = false;
     this.doubledGems = false;
     this.finalized = false;
-    this.zone = this.prevZone = 0;
+    this.planetIdx = this.prevPlanet = 0;
     this.zoneFade = 1;
+    this.phase = 'stage';
+    this.phaseT = 0;
+    this.stageEnd = STAGE_LEN;
+    this.boss = null;
+    this.gate = null;
     this.banner.life = 0;
     this.toast.life = 0;
     this.nextSpawn = this.angle + SPAWN_LEAD + (this.profile.tutorialDone ? 0 : 1.2);
@@ -489,6 +541,7 @@ export class Game {
     this.reset();
     this.banked = this.profile.missions.map((m) => m.progress);
     this.state = 'playing';
+    if (this.profile.tutorialDone) this.banner = { title: 'HOME', sub: 'Planet 1 · Fill the bar, then fly through the warp gate', life: 2.6 };
     tapHaptic();
   }
 
@@ -512,10 +565,26 @@ export class Game {
   private switchLane(): void {
     this.lastSwitchFrom = this.lane;
     this.lastSwitchAngle = this.angle;
-    this.lane = this.lane === 1 ? 0 : 1;
+    this.lane = this.nextLane();
+    if (this.lanes.length > 2 && (this.lane === 0 || this.lane === this.lanes.length - 1)) this.laneDir = this.lane === 0 ? 1 : -1;
     this.switches++;
-    this.sfx.switchLane(this.lane === 1);
+    this.sfx.switchLane(this.lane > this.lastSwitchFrom);
     tapHaptic();
+  }
+
+  /** Lane a tap would move to. Two orbits swap; three orbits bounce in and out. */
+  private nextLane(): number {
+    if (this.lanes.length === 2 || this.phase === 'warp') return 1 - Math.min(this.lane, 1);
+    return this.lane + this.laneDir;
+  }
+
+  private get planet(): Planet {
+    return PLANETS[this.planetIdx];
+  }
+
+  /** Radius of an orbit, including the black hole's shrink. */
+  private laneR(i: number): number {
+    return (this.lanes[i] ?? this.lanes[this.lanes.length - 1]) * this.shrink;
   }
 
   private gameOver(): void {
@@ -566,7 +635,7 @@ export class Game {
     this.usedContinue = true;
     this.continueOffer = 0;
     for (const o of this.objs) {
-      const ahead = (o.kind === 'comet' ? o.target : o.a) - this.angle;
+      const ahead = this.phase === 'warp' ? 0 : (o.vel !== 0 ? o.target : o.a) - this.angle;
       if (isHazard(o) && ahead > -0.6 && ahead < 2.2) {
         o.dead = true;
         const op = this.objPos(o);
@@ -574,6 +643,15 @@ export class Game {
       }
     }
     this.objs = this.objs.filter((o) => !o.dead);
+    const b = this.boss;
+    if (b && b.kind === 'worm') {
+      // Send the worm round to the far side of the planet.
+      b.headA = this.angle + Math.PI;
+      b.switches = [];
+      b.startLane = b.headLane;
+      b.segR.fill(this.laneR(b.headLane));
+      b.prevD = Math.PI;
+    }
     this.invuln = 2;
     this.trail = [];
     this.reviving = true;
@@ -646,7 +724,7 @@ export class Game {
     if (this.state === 'menu' || this.state === 'shop' || this.state === 'missions') {
       // Idle demo orbit behind the menus.
       this.angle += dt * 1.1;
-      this.radius += (LANE_R[1] - this.radius) * (1 - Math.exp(-dt * LANE_EASE));
+      this.radius += (TWO_LANES[1] - this.radius) * (1 - Math.exp(-dt * LANE_EASE));
       this.pushTrail();
     }
 
@@ -669,14 +747,42 @@ export class Game {
     this.invuln = Math.max(0, this.invuln - dt);
     const gdt = dt * (this.timers.slow > 0 ? SLOW_FACTOR : 1);
     this.gameTime += gdt;
+    this.phaseT += dt;
 
     const targetSpeed = Math.min(MAX_SPEED, BASE_SPEED + this.level * SPEED_PER_LEVEL);
     this.speed += (targetSpeed - this.speed) * (1 - Math.exp(-dt * 2));
+
+    if (this.phase === 'warp') this.updateWarp(dt, gdt);
+    else this.updateOrbit(dt, gdt);
+    if (this.state !== 'playing') return;
+
+    this.stats.score = this.score;
+    this.checkMissions();
+
+    if (!this.profile.tutorialDone && this.score >= 5 && this.switches >= 2) {
+      this.profile.tutorialDone = true;
+      saveProfile(this.profile);
+    }
+  }
+
+  /** Fraction of the current planet completed (0..1). */
+  private stageFrac(): number {
+    return Math.max(0, Math.min(1, 1 - (this.stageEnd - this.progress) / STAGE_LEN));
+  }
+
+  private updateOrbit(dt: number, gdt: number): void {
     this.angle += this.speed * gdt;
-    this.radius += (LANE_R[this.lane] - this.radius) * (1 - Math.exp(-dt * LANE_EASE));
+    const ease = this.planet.twist === 'ice' ? ICE_EASE : LANE_EASE;
+    if (this.planet.twist === 'drift') this.shrink = 1 - 0.22 * this.stageFrac();
+    this.radius += (this.laneR(this.lane) - this.radius) * (1 - Math.exp(-dt * ease));
     this.pushTrail();
 
-    while (this.angle + SPAWN_LEAD >= this.nextSpawn) this.spawnPattern();
+    if (this.phase === 'stage' || this.phase === 'gate') while (this.angle + SPAWN_LEAD >= this.nextSpawn) this.spawnPattern();
+    if (this.phase === 'bossIntro' && this.phaseT >= BOSS_INTRO) this.startBoss();
+    if (this.phase === 'boss' && this.boss) {
+      this.updateBoss(this.boss, dt, gdt);
+      if (this.state !== 'playing') return;
+    }
 
     const p = this.playerPos();
     for (const o of this.objs) {
@@ -685,7 +791,14 @@ export class Game {
       o.spin += dt * (o.kind === 'gem' ? 3 : o.kind === 'power' ? 1.5 : 0.8);
       o.a += o.vel * gdt;
 
-      // Magnet pulls nearby gems (in either orbit) towards the ship.
+      // Flares and laser beams fire as the player approaches (always telegraphed first).
+      if ((o.kind === 'flare' || o.kind === 'beam') && !o.armed && o.a - this.angle < this.speed * 0.5) {
+        o.armed = true;
+        if (o.kind === 'beam') this.sfx.laser();
+        else this.sfx.flare();
+      }
+
+      // Magnet pulls nearby gems (in any orbit) towards the ship.
       if (o.kind === 'gem' && o.fly < 0 && this.timers.magnet > 0 && o.a - this.angle < 0.75 && o.a - this.angle > -0.1) {
         const op = this.objPos(o);
         o.fly = 0;
@@ -699,10 +812,11 @@ export class Game {
       }
 
       const op = this.objPos(o);
-      const rr = this.radiusOf(o) + PLAYER_R;
-      const dx = p.x - op.x;
-      const dy = p.y - op.y;
-      if (dx * dx + dy * dy < rr * rr * (isHazard(o) ? 0.8 : 1.4)) {
+      if (this.touches(o, p, op)) {
+        if (o.kind === 'gate') {
+          this.startWarp();
+          return;
+        }
         if (isHazard(o)) {
           if (this.invuln > 0) continue;
           if (this.shield) {
@@ -723,12 +837,18 @@ export class Game {
         if (isHazard(o) && o.lane !== this.lane && this.lastSwitchFrom === o.lane) {
           // How far ahead the hazard was (in radians) when the player switched away.
           const gap = (this.angle - this.lastSwitchAngle) * (1 - o.vel / this.speed);
-          if (gap < CLOSE_CALL) this.closeCall(op);
+          if (gap < CLOSE_CALL + (o.kind === 'flare' ? FLARE_W : 0)) this.closeCall(op);
         }
       }
 
       // Passed behind the player.
-      if (this.angle - o.a > 0.35) {
+      if (this.angle - o.a > 0.35 + (o.kind === 'flare' ? FLARE_W : 0)) {
+        if (o.kind === 'gate') {
+          // Missed the gate: it comes around again next lap.
+          o.a += TAU;
+          o.crossed = false;
+          continue;
+        }
         o.dead = true;
         if (isHazard(o)) {
           this.addPoints(1);
@@ -743,13 +863,319 @@ export class Game {
     }
     this.objs = this.objs.filter((o) => !o.dead);
 
-    this.stats.score = this.score;
-    this.checkMissions();
-
-    if (!this.profile.tutorialDone && this.score >= 5 && this.switches >= 2) {
-      this.profile.tutorialDone = true;
-      saveProfile(this.profile);
+    if (this.phase === 'stage' && this.progress >= this.stageEnd) {
+      if (this.planet.boss) this.startBossIntro();
+      else this.startGate();
     }
+  }
+
+  /** Collision test between the ship and an object, by object shape. */
+  private touches(o: Obj, p: { x: number; y: number }, op: { x: number; y: number }): boolean {
+    if (this.phase !== 'warp' && (o.kind === 'flare' || o.kind === 'beam')) {
+      if (!o.armed) return false;
+      const lr = this.laneR(o.lane);
+      if (Math.abs(this.radius - lr) > 0.09) return false;
+      const da = Math.abs(this.angle - o.a);
+      return o.kind === 'flare' ? da < FLARE_W + 0.02 : da * this.radius < PLAYER_R * 0.9;
+    }
+    const rr = (o.kind === 'gate' ? GATE_R : this.radiusOf(o)) + PLAYER_R;
+    const dx = p.x - op.x;
+    const dy = p.y - op.y;
+    return dx * dx + dy * dy < rr * rr * (isHazard(o) ? 0.8 : 1.4);
+  }
+
+  // ------------------------------------------------------------------ planets, gates and warp
+
+  private startGate(): void {
+    this.phase = 'gate';
+    this.phaseT = 0;
+    const lane = Math.floor(Math.random() * this.lanes.length);
+    const a = Math.max(this.nextSpawn, this.angle + SPAWN_LEAD) + 0.4;
+    for (let i = 3; i >= 1; i--) this.addObj(a - i * 0.22, lane, 'gem');
+    this.gate = this.addObj(a, lane, 'gate');
+    this.nextSpawn = a + this.minGap() + 0.8;
+    this.banner = { title: 'WARP GATE', sub: 'Fly through it to reach the next planet!', life: 2.6 };
+    this.sfx.levelUp();
+  }
+
+  private startWarp(): void {
+    this.phase = 'warp';
+    this.phaseT = 0;
+    this.objs = [];
+    this.gate = null;
+    this.lane = 1;
+    this.warpX = WARP_X;
+    this.warpNext = 0.9;
+    this.trail = [];
+    this.flash = 0.7;
+    this.prevPlanet = this.planetIdx;
+    this.addPoints(5);
+    this.sfx.warp();
+    gemHaptic();
+    this.banner = { title: 'WARP!', sub: 'Dodge the debris', life: 1.6 };
+  }
+
+  private get warpSpeed(): number {
+    return 2.6 + this.level * 0.12;
+  }
+
+  /** Ship position during warp: in the corridor, then gliding into the new orbit. */
+  private warpShipPos(): { x: number; y: number } {
+    const k = Math.max(0, Math.min(1, (this.phaseT - (WARP_DUR - 0.9)) / 0.9));
+    const e = k * k * (3 - 2 * k);
+    return { x: this.warpX * (1 - e), y: WARP_Y + (1 - WARP_Y) * e };
+  }
+
+  private updateWarp(dt: number, gdt: number): void {
+    const v = this.warpSpeed;
+    this.warpX += ((this.lane === 0 ? -WARP_X : WARP_X) - this.warpX) * (1 - Math.exp(-dt * LANE_EASE));
+    for (const t of this.trail) t.y += v * gdt * 0.5;
+    this.pushTrail();
+
+    if (this.phaseT >= this.warpNext && this.phaseT < WARP_DUR - 1.4) this.spawnDebris();
+    if (this.phaseT > WARP_DUR - 0.9 && this.objs.length) {
+      // Clear leftover debris as the ship glides into its new orbit.
+      for (const o of this.objs) {
+        const op = this.objPos(o);
+        this.burst(op.x, op.y, 6, ['#ffffff', '#7df9ff'], 0.5);
+      }
+      this.objs = [];
+    }
+
+    const p = this.playerPos();
+    for (const o of this.objs) {
+      if (o.dead) continue;
+      o.age += dt;
+      o.spin += dt * 1.5;
+      o.y += v * gdt;
+      if (o.kind === 'gem' && o.fly < 0 && this.timers.magnet > 0 && o.y > p.y - 1.0 && o.y < p.y + 0.1) {
+        o.fly = 0;
+        o.fx = (o.lane === 0 ? -1 : 1) * WARP_X;
+        o.fy = o.y;
+      }
+      if (o.fly >= 0) {
+        o.fly += dt * 5;
+        if (o.fly >= 1) this.collectGem(o);
+        continue;
+      }
+      const op = this.objPos(o);
+      if (this.touches(o, p, op)) {
+        if (isHazard(o)) {
+          if (this.invuln > 0) continue;
+          if (this.shield) {
+            this.shieldSave(o, op);
+            continue;
+          }
+          this.gameOver();
+          return;
+        }
+        if (o.kind === 'gem') this.collectGem(o);
+        else this.collectPower(o, op);
+        continue;
+      }
+      if (o.y > p.y + 0.35) {
+        o.dead = true;
+        if (isHazard(o)) {
+          this.addPoints(1);
+          this.sfx.pass();
+        } else if (o.kind === 'gem') {
+          this.streak = 0;
+          this.mult = 1;
+        }
+      }
+    }
+    this.objs = this.objs.filter((o) => !o.dead);
+
+    if (this.phaseT >= WARP_DUR) this.arrive();
+  }
+
+  private spawnDebris(): void {
+    const top = -this.cy / this.scale - 0.3;
+    const lane = Math.random() < 0.5 ? 0 : 1;
+    const q = Math.random();
+    this.addObj(0, lane, 'rock', { y: top });
+    if (q < 0.1) this.addObj(0, 1 - lane, 'power', { y: top, power: this.pickPower() });
+    else if (q < 0.55) this.addObj(0, 1 - lane, 'gem', { y: top });
+    this.warpNext += Math.max(0.42, 0.6 - this.level * 0.015) + Math.random() * 0.22;
+  }
+
+  private arrive(): void {
+    this.planetIdx = (this.planetIdx + 1) % PLANETS.length;
+    this.boss = null;
+    this.level++;
+    this.stats.planets++;
+    this.phase = 'stage';
+    this.phaseT = 0;
+    this.objs = [];
+    this.lanes = this.planet.twist === 'three' ? THREE_LANES : TWO_LANES;
+    this.shrink = 1;
+    this.lane = this.lanes.length - 1;
+    this.laneDir = -1;
+    this.angle = Math.PI / 2;
+    this.radius = this.laneR(this.lane);
+    this.lastSwitchAngle = -99;
+    this.trail = [];
+    this.nextSpawn = this.angle + SPAWN_LEAD + 0.5;
+    this.stageEnd = this.progress + STAGE_LEN;
+    this.banner = { title: this.planet.name.toUpperCase(), sub: `Planet ${this.stats.planets} · ${this.planet.hint}`, life: 3 };
+    this.flash = 0.4;
+    this.sfx.arrive();
+  }
+
+  // ------------------------------------------------------------------ bosses
+
+  private startBossIntro(): void {
+    this.phase = 'bossIntro';
+    this.phaseT = 0;
+    const info = BOSSES[this.planet.boss!];
+    this.banner = { title: 'WARNING!', sub: `${info.name} APPROACHING`, life: BOSS_INTRO + 0.4 };
+    this.sfx.siren();
+    crashHaptic();
+  }
+
+  private startBoss(): void {
+    const lane = Math.floor(Math.random() * this.lanes.length);
+    this.phase = 'boss';
+    this.phaseT = 0;
+    this.boss = {
+      kind: this.planet.boss!,
+      t: 0,
+      headA: this.angle + Math.PI,
+      headLane: lane,
+      startLane: lane,
+      switches: [],
+      segR: new Array(WORM_SEGS).fill(this.laneR(lane)),
+      prevD: Math.PI,
+    };
+    this.nextSpawn = Math.max(this.nextSpawn, this.angle + 1.2);
+  }
+
+  private updateBoss(b: Boss, dt: number, gdt: number): void {
+    b.t += gdt;
+    if (b.kind === 'worm') this.updateWorm(b, dt, gdt);
+    else this.updateUfo(b);
+    if (this.state !== 'playing') return;
+    if (b.t >= BOSS_DUR) this.defeatBoss(b);
+  }
+
+  /** Lane of the worm's body at angle `a`: it follows the path its head took. */
+  private wormLaneAt(b: Boss, a: number): number {
+    let lane = b.startLane;
+    for (const sw of b.switches) if (a <= sw.a) lane = sw.lane;
+    return lane;
+  }
+
+  private wormSegPos(b: Boss, i: number): { x: number; y: number; a: number } {
+    const a = b.headA + i * WORM_SPACING;
+    return { x: Math.cos(a) * b.segR[i], y: Math.sin(a) * b.segR[i], a };
+  }
+
+  private updateWorm(b: Boss, dt: number, gdt: number): void {
+    b.headA -= WORM_SPEED * gdt;
+    const d = wrap(b.headA - this.angle);
+    if (d > b.prevD + Math.PI) {
+      // The head just passed the player, so the next meeting is about a lap away:
+      // the only safe moment to change orbit (the whole body clears the switch
+      // point before the player gets there, and the player has time to react).
+      this.addPoints(2);
+      const p = this.playerPos();
+      this.addText('DODGED!', p.x, p.y, '#b36bff', 0.08);
+      const dMin = Math.max((WORM_SEGS * WORM_SPACING * this.speed) / WORM_SPEED + (this.speed + WORM_SPEED) * 0.3, (this.speed + WORM_SPEED) * 0.75);
+      if (d >= dMin && Math.random() < 0.75) {
+        const options = this.lanes.map((_, i) => i).filter((i) => i !== b.headLane);
+        b.headLane = options[Math.floor(Math.random() * options.length)];
+        b.switches.push({ a: b.headA, lane: b.headLane });
+      }
+    }
+    b.prevD = d;
+
+    // Forget switch points the whole body has passed.
+    const tailA = b.headA + (WORM_SEGS - 1) * WORM_SPACING;
+    while (b.switches.length && tailA <= b.switches[0].a) b.startLane = b.switches.shift()!.lane;
+
+    const p = this.playerPos();
+    for (let i = 0; i < WORM_SEGS; i++) {
+      const a = b.headA + i * WORM_SPACING;
+      b.segR[i] += (this.laneR(this.wormLaneAt(b, a)) - b.segR[i]) * (1 - Math.exp(-dt * 16));
+      const sp = this.wormSegPos(b, i);
+      const rr = (i === 0 ? 0.075 : 0.06) + PLAYER_R * 0.85;
+      if ((p.x - sp.x) ** 2 + (p.y - sp.y) ** 2 < rr * rr && this.invuln <= 0) {
+        if (this.shield) {
+          this.shield = false;
+          this.invuln = 1.2;
+          this.stats.shieldSaves++;
+          this.shake = 0.45;
+          this.burst(sp.x, sp.y, 30, ['#b36bff', '#7df9ff', '#ffffff'], 1.2);
+          this.addText('SAVED!', sp.x, sp.y, '#7df9ff', 0.08);
+          this.sfx.shieldBreak();
+          crashHaptic();
+        } else {
+          this.gameOver();
+        }
+        return;
+      }
+    }
+
+    // Gems to chase during the fight.
+    while (this.angle + SPAWN_LEAD >= this.nextSpawn) {
+      if (b.t < BOSS_DUR - 2 && Math.random() < 0.6) {
+        const lane = Math.floor(Math.random() * this.lanes.length);
+        for (let i = 0; i < 3; i++) this.addObj(this.nextSpawn + i * 0.2, lane, 'gem');
+      }
+      this.nextSpawn += 1.4;
+    }
+  }
+
+  /** The UFO hovers above the orbits, drifting from side to side. */
+  private ufoPos(): { x: number; y: number } {
+    return { x: Math.sin(this.time * 0.8) * 0.45, y: -1.35 + Math.sin(this.time * 3) * 0.015 };
+  }
+
+  private updateUfo(b: Boss): void {
+    while (this.angle + SPAWN_LEAD >= this.nextSpawn) {
+      const a = this.nextSpawn;
+      if (b.t > BOSS_DUR - 2) {
+        this.nextSpawn += 1;
+        continue;
+      }
+      const lane = Math.floor(Math.random() * this.lanes.length);
+      const other = (lane + 1) % this.lanes.length;
+      const sep = this.minGap() + 0.05;
+      if (Math.random() < 0.4) {
+        // Double shot: one beam per orbit, staggered just enough to weave through.
+        this.addObj(a, lane, 'beam');
+        this.addObj(a + sep, other, 'beam');
+        this.nextSpawn = a + sep + this.minGap() + Math.random() * 0.3;
+      } else {
+        this.addObj(a, lane, 'beam');
+        if (Math.random() < 0.5) this.addObj(a, other, 'gem');
+        this.nextSpawn = a + this.minGap() + 0.1 + Math.random() * 0.3;
+      }
+    }
+  }
+
+  private defeatBoss(b: Boss): void {
+    const info = BOSSES[b.kind];
+    if (b.kind === 'worm') {
+      for (let i = 0; i < WORM_SEGS; i += 2) {
+        const sp = this.wormSegPos(b, i);
+        this.burst(sp.x, sp.y, 10, [info.color, '#ffd166', '#ffffff'], 1.2);
+      }
+    } else {
+      const u = this.ufoPos();
+      this.burst(u.x, u.y, 50, [info.color, '#ffd166', '#ffffff'], 1.8);
+    }
+    this.boss = null;
+    this.objs = this.objs.filter((o) => o.kind !== 'beam');
+    this.stats.bosses++;
+    this.stats.gems += 10;
+    this.addPoints(20);
+    this.shake = 0.7;
+    this.flash = 0.5;
+    this.showToast(`${info.name} DEFEATED! +10 GEMS`, '#ffd166');
+    this.sfx.bossDefeated();
+    gemHaptic();
+    this.startGate();
   }
 
   private radiusOf(o: Obj): number {
@@ -758,6 +1184,8 @@ export class Game {
         return ROCK_R;
       case 'comet':
         return COMET_R;
+      case 'gate':
+        return GATE_R;
       case 'power':
         return POWER_R;
       default:
@@ -822,16 +1250,6 @@ export class Game {
     this.score += n;
     this.progress += base;
     if (x !== undefined && y !== undefined) this.addText(`+${n}`, x, y, color, 0.09);
-    const lvl = Math.floor(this.progress / POINTS_PER_LEVEL);
-    if (lvl > this.level) {
-      this.level = lvl;
-      this.prevZone = this.zone;
-      this.zone = lvl % THEMES.length;
-      this.zoneFade = 0;
-      const faster = BASE_SPEED + lvl * SPEED_PER_LEVEL <= MAX_SPEED + SPEED_PER_LEVEL;
-      this.banner = { title: `ZONE ${lvl + 1}`, sub: THEMES[this.zone].name + (faster ? ' · SPEED UP' : ''), life: 2.2 };
-      this.sfx.levelUp();
-    }
   }
 
   private checkMissions(): void {
@@ -846,39 +1264,56 @@ export class Game {
 
   /** Minimum angular gap so a lane switch between two obstacles is always possible. */
   private minGap(): number {
-    return 0.45 + this.speed * 0.28;
+    let g = 0.45 + this.speed * 0.28;
+    const t = this.planet.twist;
+    if (t === 'ice') g += 0.3 + this.speed * 0.12;
+    if (t === 'flares') g += FLARE_W * 2;
+    if (t === 'three') g *= 1.1;
+    return g;
   }
 
   private spawnPattern(): void {
     const a = this.nextSpawn;
-    const lane = (Math.random() < 0.5 ? 0 : 1) as 0 | 1;
-    const other = (1 - lane) as 0 | 1;
+    if (this.phase === 'gate' && this.gate) {
+      // Keep the space around the warp gate clear.
+      const dist = Math.abs(wrap(a - this.gate.a + Math.PI) - Math.PI);
+      if (dist < 1.1) {
+        this.nextSpawn = a + 0.4;
+        return;
+      }
+    }
+    const twist = this.planet.twist;
+    const n = this.lanes.length;
+    const lane = Math.floor(Math.random() * n);
+    const other = n === 2 ? 1 - lane : (lane + 1 + Math.floor(Math.random() * (n - 1))) % n;
     const ease = Math.max(0, 0.6 - this.progress * 0.02); // gentler start
     let gap = this.minGap() + ease + Math.random() * 0.35;
     const r = Math.random();
+    const comets = n === 2 ? (twist === 'comets' ? 0.35 : this.progress >= 30 ? 0.1 : 0) : 0;
 
-    if (this.progress >= 30 && r < 0.12) {
+    if (r < comets) {
       // Comet: launched so it crosses slot `a` in its orbit exactly when the
       // player arrives there, so it behaves like a rock at `a` for fairness.
       const t = (a - this.angle) / this.speed;
       this.addObj(a + COMET_SPEED * t, lane, 'comet', { vel: -COMET_SPEED, target: a });
       if (Math.random() < 0.5) this.addObj(a, other, 'gem');
       gap += 0.3;
-    } else if (this.progress >= 12 && r < 0.4) {
-      // Zig-zag: rocks alternate lanes, forcing quick double switches.
-      const n = this.progress >= 40 ? 3 : 2;
+    } else if (n === 2 && this.progress >= 12 && r < comets + 0.28) {
+      // Zig-zag: hazards alternate lanes, forcing quick double switches.
+      const count = this.progress >= 40 ? 3 : 2;
       const sep = this.minGap() + 0.05;
-      for (let i = 0; i < n; i++) this.addObj(a + i * sep, (i % 2 === 0 ? lane : other) as 0 | 1, 'rock');
+      for (let i = 0; i < count; i++) this.hazard(a + i * sep, i % 2 === 0 ? lane : other);
       if (Math.random() < 0.5) this.addObj(a + sep * 0.5, other, 'gem');
-      gap += sep * (n - 1);
-    } else if (r < 0.55) {
+      gap += sep * (count - 1);
+    } else if (r < comets + 0.45) {
       // Gem arc: a short line of gems, sometimes capped with a power-up.
       for (let i = 0; i < 3; i++) this.addObj(a + i * 0.22, lane, 'gem');
       if (Math.random() < 0.15) this.addObj(a + 0.66, lane, 'power', { power: this.pickPower() });
       gap += 0.6;
     } else {
-      // Single rock, with a gem or power-up in the safe lane.
-      this.addObj(a, lane, 'rock');
+      // Single hazard, with a gem or power-up in a safe lane. On three orbits only
+      // one orbit is ever blocked, so any tap (in or out) is always an escape.
+      this.hazard(a, lane);
       const q = Math.random();
       if (q < 0.1) this.addObj(a, other, 'power', { power: this.pickPower() });
       else if (q < 0.45) this.addObj(a, other, 'gem');
@@ -886,12 +1321,26 @@ export class Game {
     this.nextSpawn = a + gap;
   }
 
+  /** A planet-appropriate obstacle at slot `a`. */
+  private hazard(a: number, lane: number): void {
+    const twist = this.planet.twist;
+    if (twist === 'flares' && Math.random() < 0.6) {
+      this.addObj(a, lane, 'flare');
+    } else if (twist === 'drift') {
+      // Drifting rock, aimed (like comets) to reach slot `a` as the player does.
+      const t = (a - this.angle) / this.speed;
+      this.addObj(a + DRIFT_SPEED * t, lane, 'rock', { vel: -DRIFT_SPEED, target: a });
+    } else {
+      this.addObj(a, lane, 'rock');
+    }
+  }
+
   private pickPower(): PowerKind {
     const pool = POWER_KINDS.filter((k) => !(k === 'shield' && this.shield));
     return pool[Math.floor(Math.random() * pool.length)];
   }
 
-  private addObj(a: number, lane: 0 | 1, kind: Kind, extra: { vel?: number; target?: number; power?: PowerKind } = {}): void {
+  private addObj(a: number, lane: number, kind: Kind, extra: { vel?: number; target?: number; power?: PowerKind; y?: number } = {}): Obj {
     const shape: number[] = [];
     for (let i = 0; i < 8; i++) shape.push(0.78 + Math.random() * 0.32);
     this.objs.push({
@@ -909,7 +1358,10 @@ export class Game {
       fly: -1,
       fx: 0,
       fy: 0,
+      y: extra.y ?? 0,
+      armed: false,
     });
+    return this.objs[this.objs.length - 1];
   }
 
   private updateFx(dt: number): void {
@@ -960,6 +1412,7 @@ export class Game {
   }
 
   private playerPos(): { x: number; y: number } {
+    if (this.phase === 'warp' && this.state !== 'menu') return this.warpShipPos();
     return { x: Math.cos(this.angle) * this.radius, y: Math.sin(this.angle) * this.radius };
   }
 
@@ -970,16 +1423,48 @@ export class Game {
       const e = k * k;
       return { x: o.fx + (p.x - o.fx) * e, y: o.fy + (p.y - o.fy) * e };
     }
-    const r = LANE_R[o.lane];
+    if (this.phase === 'warp') return { x: (o.lane === 0 ? -1 : 1) * WARP_X, y: o.y };
+    const r = this.laneR(o.lane);
     return { x: Math.cos(o.a) * r, y: Math.sin(o.a) * r };
   }
 
   /** Snapshot used by the automated playtest bot (dev builds only). */
   debugState() {
+    const slow = this.timers.slow > 0 ? SLOW_FACTOR : 1;
+    const threats: { lane: number; t0: number; t1: number }[] = [];
+    let gate: { lane: number; t: number } | null = null;
+    if (this.phase === 'warp') {
+      const v = this.warpSpeed * slow;
+      for (const o of this.objs) if (isHazard(o)) threats.push({ lane: o.lane, t0: (WARP_Y - 0.16 - o.y) / v, t1: (WARP_Y + 0.16 - o.y) / v });
+    } else {
+      const w = this.speed * slow;
+      for (const o of this.objs) {
+        if (o.kind === 'gate') gate = { lane: o.lane, t: (o.a - this.angle) / w };
+        if (!isHazard(o)) continue;
+        const rel = w - o.vel * slow;
+        const half = o.kind === 'flare' ? FLARE_W + 0.12 : 0.16;
+        threats.push({ lane: o.lane, t0: (o.a - this.angle - half) / rel, t1: (o.a - this.angle + half) / rel });
+      }
+      const b = this.boss;
+      if (b && b.kind === 'worm') {
+        const rel = (this.speed + WORM_SPEED) * slow;
+        for (let i = 0; i < WORM_SEGS; i++) {
+          const a = b.headA + i * WORM_SPACING;
+          const d = wrap(a - this.angle + 1) - 1;
+          threats.push({ lane: this.wormLaneAt(b, a), t0: (d - 0.17) / rel, t1: (d + 0.17) / rel });
+        }
+      }
+    }
     return {
       angle: this.angle,
+      phase: this.phase,
+      planet: this.planet.name,
       lane: this.lane,
-      speed: this.speed * (this.timers.slow > 0 ? SLOW_FACTOR : 1),
+      nextLane: this.nextLane(),
+      lanes: this.lanes.length,
+      threats,
+      gate,
+      speed: this.speed * slow,
       objs: this.objs.map((o) => ({ a: o.a, lane: o.lane, kind: o.kind, vel: o.vel })),
     };
   }
@@ -988,11 +1473,16 @@ export class Game {
 
   render(ctx: CanvasRenderingContext2D): void {
     const { w, h } = this;
-    const zone = this.state === 'playing' || this.state === 'paused' || this.state === 'over' ? this.zone : 0;
-    const prev = this.state === 'playing' || this.state === 'paused' || this.state === 'over' ? this.prevZone : 0;
-    this.drawBackground(ctx, THEMES[prev], 1);
-    if (this.zoneFade < 1) this.drawBackground(ctx, THEMES[zone], this.zoneFade);
-    const theme = THEMES[zone];
+    const inRun = this.state === 'playing' || this.state === 'paused' || this.state === 'over';
+    const planet = inRun ? this.planet : PLANETS[0];
+    const warping = inRun && this.phase === 'warp';
+    const warpK = warping ? this.smooth(this.phaseT / WARP_DUR) : 1;
+    if (warping) {
+      this.drawBackground(ctx, PLANETS[this.prevPlanet].theme, 1);
+      this.drawBackground(ctx, PLANETS[(this.prevPlanet + 1) % PLANETS.length].theme, warpK);
+    } else {
+      this.drawBackground(ctx, planet.theme, 1);
+    }
 
     ctx.save();
     if (this.shake > 0) {
@@ -1002,13 +1492,17 @@ export class Game {
     ctx.translate(this.cx, this.cy);
     const S = this.scale;
 
-    this.drawStars(ctx, S);
-    if (this.zoneFade < 1) this.drawPlanet(ctx, S, THEMES[prev], 1);
-    this.drawPlanet(ctx, S, theme, this.zoneFade);
-    this.drawPlanetLabel(ctx, S);
-    this.drawLanes(ctx, S);
-    for (const o of this.objs) if (o.kind === 'comet') this.drawCometMarker(ctx, o, S);
-    for (const o of this.objs) this.drawObj(ctx, o, S);
+    if (warping) {
+      this.drawWarpScene(ctx, S);
+    } else {
+      this.drawStars(ctx, S);
+      this.drawPlanet(ctx, S, planet);
+      this.drawPlanetLabel(ctx, S);
+      this.drawLanes(ctx, S, planet);
+      for (const o of this.objs) if (o.kind === 'comet') this.drawCometMarker(ctx, o, S);
+      for (const o of this.objs) this.drawObj(ctx, o, S);
+      if (inRun && this.boss) this.drawBoss(ctx, this.boss, S);
+    }
     if (this.state !== 'over' && this.state !== 'shop' && this.state !== 'missions') this.drawPlayer(ctx, S);
     this.drawParticles(ctx, S);
     this.drawTexts(ctx, S);
@@ -1029,6 +1523,70 @@ export class Game {
     }
 
     this.drawHud(ctx);
+  }
+
+  private smooth(k: number): number {
+    const c = Math.max(0, Math.min(1, k));
+    return c * c * (3 - 2 * c);
+  }
+
+  /** Warp flight: streaking stars, the old planet falling away, the new one arriving. */
+  private drawWarpScene(ctx: CanvasRenderingContext2D, S: number): void {
+    const T = this.phaseT;
+    const halfH = this.cy / S + 0.5;
+    const halfW = this.w / 2 / S;
+    const speed = Math.min(1, T / 0.6) * Math.min(1, (WARP_DUR - T) / 0.8);
+
+    // Streaking stars.
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineCap = 'round';
+    for (let i = 0; i < this.stars.length; i += 2) {
+      const st = this.stars[i];
+      const x = (Math.cos(st.a) * st.d * 0.7) * halfW;
+      const span = halfH * 2;
+      const y = (((Math.sin(st.a) * st.d * halfH + this.time * (1 + st.size) * 3) % span) + span) % span - halfH;
+      ctx.globalAlpha = 0.15 + 0.35 * st.size / 1.7;
+      ctx.lineWidth = st.size;
+      ctx.beginPath();
+      ctx.moveTo(x * S, y * S);
+      ctx.lineTo(x * S, (y - 0.03 - speed * 0.18 * st.size) * S);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+
+    // The planet we left drops away; the next one rises into place.
+    if (T < 1.4) {
+      const e = this.smooth(T / 1.4);
+      this.drawPlanet(ctx, S, PLANETS[this.prevPlanet], 1 - e * 0.3, 0, e * (halfH + 1), 1 + e * 0.6);
+    }
+    const arriveStart = WARP_DUR - 1.5;
+    if (T > arriveStart) {
+      const e = this.smooth((T - arriveStart) / 1.5);
+      const next = PLANETS[(this.prevPlanet + 1) % PLANETS.length];
+      this.drawPlanet(ctx, S, next, e, 0, -(halfH + 0.5) * (1 - e), 0.5 + 0.5 * e);
+      if (e > 0.6) {
+        ctx.globalAlpha = (e - 0.6) / 0.4;
+        this.drawLanes(ctx, S, next, next.twist === 'three' ? THREE_LANES : TWO_LANES);
+        ctx.globalAlpha = 1;
+      }
+    }
+
+    // Corridor guides.
+    if (T < WARP_DUR - 0.9) {
+      ctx.setLineDash([S * 0.06, S * 0.08]);
+      ctx.lineDashOffset = -this.time * S * this.warpSpeed;
+      ctx.lineWidth = Math.max(1.5, S * 0.008);
+      for (const x of [-WARP_X, WARP_X]) {
+        const active = (x < 0 ? 0 : 1) === this.lane;
+        ctx.strokeStyle = active ? 'rgba(125, 249, 255, 0.4)' : 'rgba(255,255,255,0.12)';
+        ctx.beginPath();
+        ctx.moveTo(x * S, -halfH * S);
+        ctx.lineTo(x * S, halfH * S);
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+    }
+    for (const o of this.objs) this.drawObj(ctx, o, S);
   }
 
   private drawBackground(ctx: CanvasRenderingContext2D, t: Theme, alpha: number): void {
@@ -1055,9 +1613,32 @@ export class Game {
     ctx.globalAlpha = 1;
   }
 
-  private drawPlanet(ctx: CanvasRenderingContext2D, S: number, t: Theme, alpha: number): void {
-    const r = 0.3 * S;
+  private drawPlanet(ctx: CanvasRenderingContext2D, S: number, pl: Planet, alpha = 1, ox = 0, oy = 0, k = 1): void {
+    const t: Theme = pl.theme;
+    const r = 0.3 * S * k;
+    ctx.save();
+    ctx.translate(ox * S, oy * S);
     ctx.globalAlpha = alpha;
+
+    if (pl.style === 'pulsar') {
+      // Rotating light beams behind the star.
+      ctx.save();
+      ctx.rotate(this.time * 1.2);
+      for (const dir of [0, Math.PI]) {
+        const g = ctx.createLinearGradient(0, 0, Math.cos(dir) * r * 6, Math.sin(dir) * r * 6);
+        g.addColorStop(0, `rgba(${t.glow}, 0.35)`);
+        g.addColorStop(1, `rgba(${t.glow}, 0)`);
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(Math.cos(dir - 0.12) * r * 6, Math.sin(dir - 0.12) * r * 6);
+        ctx.lineTo(Math.cos(dir + 0.12) * r * 6, Math.sin(dir + 0.12) * r * 6);
+        ctx.closePath();
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
     const glow = ctx.createRadialGradient(0, 0, r * 0.8, 0, 0, r * 2.2);
     glow.addColorStop(0, `rgba(${t.glow}, 0.35)`);
     glow.addColorStop(1, `rgba(${t.glow}, 0)`);
@@ -1065,6 +1646,43 @@ export class Game {
     ctx.beginPath();
     ctx.arc(0, 0, r * 2.2, 0, Math.PI * 2);
     ctx.fill();
+
+    if (pl.style === 'blackhole') {
+      // Accretion disk (back half), the event horizon, then the disk's front half.
+      const disk = (from: number, to: number) => {
+        ctx.save();
+        ctx.rotate(-0.35);
+        ctx.scale(1, 0.32);
+        for (let i = 0; i < 3; i++) {
+          ctx.strokeStyle = ['rgba(255, 120, 40, 0.55)', 'rgba(255, 190, 90, 0.75)', 'rgba(255, 240, 200, 0.6)'][i];
+          ctx.lineWidth = r * (0.32 - i * 0.09);
+          ctx.beginPath();
+          ctx.arc(0, 0, r * (1.7 - i * 0.18), from + this.time * 0.6, to + this.time * 0.6);
+          ctx.stroke();
+        }
+        ctx.restore();
+      };
+      disk(Math.PI, Math.PI * 2);
+      disk(0, Math.PI);
+      ctx.fillStyle = '#000000';
+      ctx.beginPath();
+      ctx.arc(0, 0, r * 0.82, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255, 200, 120, 0.9)';
+      ctx.lineWidth = Math.max(1.5, r * 0.05);
+      ctx.stroke();
+      ctx.save();
+      ctx.rotate(-0.35);
+      ctx.scale(1, 0.32);
+      ctx.strokeStyle = 'rgba(255, 200, 110, 0.8)';
+      ctx.lineWidth = r * 0.22;
+      ctx.beginPath();
+      ctx.arc(0, 0, r * 1.55, 0.15 + this.time * 0.6, Math.PI - 0.15 + this.time * 0.6);
+      ctx.stroke();
+      ctx.restore();
+      ctx.restore();
+      return;
+    }
 
     const body = ctx.createRadialGradient(-r * 0.35, -r * 0.35, r * 0.1, 0, 0, r);
     body.addColorStop(0, t.planet[0]);
@@ -1074,13 +1692,59 @@ export class Game {
     ctx.beginPath();
     ctx.arc(0, 0, r, 0, Math.PI * 2);
     ctx.fill();
-    ctx.globalAlpha = 1;
+
+    // Surface details, clipped to the planet.
+    ctx.save();
+    ctx.clip();
+    if (pl.style === 'rocky') {
+      ctx.fillStyle = 'rgba(30, 10, 80, 0.25)';
+      for (const [cx, cy, cr] of [[0.35, 0.3, 0.18], [-0.4, 0.1, 0.12], [0.05, -0.45, 0.1], [-0.15, 0.55, 0.08]]) {
+        ctx.beginPath();
+        ctx.arc(cx * r, cy * r, cr * r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    } else if (pl.style === 'lava') {
+      ctx.strokeStyle = `rgba(255, 190, 70, ${0.55 + 0.3 * Math.sin(this.time * 3)})`;
+      ctx.lineWidth = Math.max(1.5, r * 0.06);
+      ctx.lineCap = 'round';
+      for (const [x1, y1, x2, y2, x3, y3] of [[-0.9, -0.2, -0.2, -0.4, 0.3, 0.1], [-0.5, 0.6, 0, 0.2, 0.7, 0.4], [0.2, -0.9, 0.4, -0.4, 0.9, -0.3]]) {
+        ctx.beginPath();
+        ctx.moveTo(x1 * r, y1 * r);
+        ctx.quadraticCurveTo(x2 * r, y2 * r, x3 * r, y3 * r);
+        ctx.stroke();
+      }
+    } else if (pl.style === 'ice') {
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+      ctx.beginPath();
+      ctx.ellipse(0, -r * 0.92, r * 0.7, r * 0.3, 0, 0, Math.PI * 2);
+      ctx.ellipse(0, r * 0.95, r * 0.55, r * 0.22, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(220, 250, 255, 0.5)';
+      ctx.lineWidth = Math.max(1, r * 0.03);
+      ctx.beginPath();
+      ctx.moveTo(-r * 0.7, -r * 0.1);
+      ctx.lineTo(-r * 0.2, r * 0.05);
+      ctx.lineTo(r * 0.1, -r * 0.2);
+      ctx.lineTo(r * 0.6, r * 0.15);
+      ctx.stroke();
+    } else if (pl.style === 'gas') {
+      for (let i = -5; i <= 5; i++) {
+        ctx.fillStyle = i % 2 ? 'rgba(255, 255, 255, 0.13)' : 'rgba(120, 50, 0, 0.16)';
+        ctx.fillRect(-r, i * r * 0.2 + Math.sin(this.time + i) * r * 0.02, r * 2, r * 0.11);
+      }
+      ctx.fillStyle = 'rgba(190, 70, 30, 0.55)';
+      ctx.beginPath();
+      ctx.ellipse(r * 0.3, r * 0.35, r * 0.22, r * 0.12, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+    ctx.restore();
   }
 
   /** Score (while playing) or play button (on the menu) inside the planet. */
   private drawPlanetLabel(ctx: CanvasRenderingContext2D, S: number): void {
     const r = 0.3 * S;
-    if (this.state === 'playing' || this.state === 'paused') {
+    if ((this.state === 'playing' || this.state === 'paused') && this.phase !== 'warp') {
       const color = this.timers.double > 0 ? '#ffd166' : 'rgba(255,255,255,0.95)';
       text(ctx, String(this.score), 0, r * 0.04, r * (this.score >= 1000 ? 0.55 : 0.75), color, 800);
     } else if (this.state === 'menu') {
@@ -1097,15 +1761,16 @@ export class Game {
     }
   }
 
-  private drawLanes(ctx: CanvasRenderingContext2D, S: number): void {
+  private drawLanes(ctx: CanvasRenderingContext2D, S: number, pl: Planet, lanes = this.lanes): void {
     ctx.lineWidth = Math.max(1.5, S * 0.008);
     ctx.setLineDash([S * 0.03, S * 0.045]);
-    LANE_R.forEach((lr, i) => {
-      const active = this.state === 'playing' && this.lane === i;
-      ctx.strokeStyle = active ? 'rgba(125, 249, 255, 0.45)' : 'rgba(255, 255, 255, 0.14)';
-      ctx.lineDashOffset = -this.time * S * 0.08 * (i === 0 ? 1 : -1);
+    const ice = pl.twist === 'ice';
+    lanes.forEach((lr, i) => {
+      const active = this.state === 'playing' && this.lane === i && this.phase !== 'warp';
+      ctx.strokeStyle = active ? (ice ? 'rgba(200, 245, 255, 0.7)' : 'rgba(125, 249, 255, 0.45)') : ice ? 'rgba(200, 245, 255, 0.25)' : 'rgba(255, 255, 255, 0.14)';
+      ctx.lineDashOffset = -this.time * S * 0.08 * (i % 2 === 0 ? 1 : -1);
       ctx.beginPath();
-      ctx.arc(0, 0, lr * S, 0, Math.PI * 2);
+      ctx.arc(0, 0, lr * (lanes === this.lanes ? this.shrink : 1) * S, 0, Math.PI * 2);
       ctx.stroke();
     });
     ctx.setLineDash([]);
@@ -1114,7 +1779,7 @@ export class Game {
   /** Pulsing warning where an incoming comet will cross the player's path. */
   private drawCometMarker(ctx: CanvasRenderingContext2D, o: Obj, S: number): void {
     if (o.crossed) return;
-    const r = LANE_R[o.lane] * S;
+    const r = this.laneR(o.lane) * S;
     const pulse = 0.5 + 0.5 * Math.sin(this.time * 12);
     ctx.strokeStyle = `rgba(255, 93, 93, ${0.35 + pulse * 0.5})`;
     ctx.lineWidth = S * 0.035;
@@ -1130,9 +1795,22 @@ export class Game {
     const appear = Math.min(1, o.age / 0.25);
     const k = appear * (2 - appear) * (o.fly >= 0 ? 1 - o.fly * 0.5 : 1);
 
+    if (o.kind === 'flare') {
+      this.drawFlare(ctx, o, S, k);
+      return;
+    }
+    if (o.kind === 'beam') {
+      this.drawBeam(ctx, o, S, k);
+      return;
+    }
+    if (o.kind === 'gate') {
+      this.drawGate(ctx, p.x * S, p.y * S, S, k);
+      return;
+    }
+
     if (o.kind === 'comet') {
       // Tail trails behind the comet (towards larger angles).
-      const lr = LANE_R[o.lane];
+      const lr = this.laneR(o.lane);
       const steps = 10;
       for (let i = steps; i >= 1; i--) {
         const ta = o.a + i * 0.035;
@@ -1210,6 +1888,190 @@ export class Game {
     ctx.restore();
   }
 
+  private drawFlare(ctx: CanvasRenderingContext2D, o: Obj, S: number, k: number): void {
+    const r = this.laneR(o.lane) * S;
+    ctx.lineCap = 'round';
+    if (!o.armed) {
+      // Dormant: a glowing, pulsing warning strip on the orbit.
+      const pulse = 0.4 + 0.35 * Math.sin(this.time * 10 + o.a);
+      ctx.strokeStyle = `rgba(255, 140, 50, ${pulse * k})`;
+      ctx.lineWidth = S * 0.035;
+      ctx.setLineDash([S * 0.02, S * 0.02]);
+      ctx.beginPath();
+      ctx.arc(0, 0, r, o.a - FLARE_W, o.a + FLARE_W);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      return;
+    }
+    // Erupting: a bright band with flame tongues licking outwards.
+    ctx.save();
+    ctx.shadowColor = '#ff8a3d';
+    ctx.shadowBlur = S * 0.08;
+    ctx.strokeStyle = '#ffb347';
+    ctx.lineWidth = S * 0.075;
+    ctx.beginPath();
+    ctx.arc(0, 0, r, o.a - FLARE_W, o.a + FLARE_W);
+    ctx.stroke();
+    ctx.restore();
+    ctx.strokeStyle = '#fff2b0';
+    ctx.lineWidth = S * 0.02;
+    for (let j = 0; j <= 6; j++) {
+      const a = o.a - FLARE_W + (j / 6) * FLARE_W * 2;
+      const len = S * (0.06 + 0.07 * (0.5 + 0.5 * Math.sin(this.time * 25 + j * 1.7)));
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(a) * (r - len * 0.6), Math.sin(a) * (r - len * 0.6));
+      ctx.lineTo(Math.cos(a) * (r + len), Math.sin(a) * (r + len));
+      ctx.stroke();
+    }
+  }
+
+  private drawBeam(ctx: CanvasRenderingContext2D, o: Obj, S: number, k: number): void {
+    const lr = this.laneR(o.lane);
+    const r0 = (lr - 0.1) * S;
+    const r1 = (lr + 0.1) * S;
+    const c = Math.cos(o.a);
+    const sn = Math.sin(o.a);
+    ctx.lineCap = 'round';
+    if (!o.armed) {
+      const pulse = 0.4 + 0.4 * Math.sin(this.time * 14);
+      ctx.strokeStyle = `rgba(255, 93, 93, ${pulse * k})`;
+      ctx.lineWidth = 2;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.moveTo(c * r0, sn * r0);
+      ctx.lineTo(c * r1, sn * r1);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.arc(c * lr * S, sn * lr * S, S * 0.045, 0, Math.PI * 2);
+      ctx.stroke();
+      return;
+    }
+    // Firing: a laser from the UFO plus the hot beam across the orbit.
+    if (this.boss && this.boss.kind === 'ufo') {
+      const u = this.ufoPos();
+      const ux = u.x * S;
+      const uy = u.y * S;
+      ctx.strokeStyle = 'rgba(255, 93, 93, 0.45)';
+      ctx.lineWidth = S * 0.012;
+      ctx.beginPath();
+      ctx.moveTo(ux, uy);
+      ctx.lineTo(c * lr * S, sn * lr * S);
+      ctx.stroke();
+    }
+    ctx.save();
+    ctx.shadowColor = '#ff3b3b';
+    ctx.shadowBlur = S * 0.08;
+    ctx.strokeStyle = '#ff5d5d';
+    ctx.lineWidth = S * 0.05;
+    ctx.beginPath();
+    ctx.moveTo(c * r0, sn * r0);
+    ctx.lineTo(c * r1, sn * r1);
+    ctx.stroke();
+    ctx.restore();
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = S * 0.016;
+    ctx.beginPath();
+    ctx.moveTo(c * r0, sn * r0);
+    ctx.lineTo(c * r1, sn * r1);
+    ctx.stroke();
+  }
+
+  private drawGate(ctx: CanvasRenderingContext2D, x: number, y: number, S: number, k: number): void {
+    const r = GATE_R * S * 1.25 * k;
+    ctx.save();
+    ctx.translate(x, y);
+    const g = ctx.createRadialGradient(0, 0, 0, 0, 0, r * 1.8);
+    g.addColorStop(0, 'rgba(125, 249, 255, 0.55)');
+    g.addColorStop(0.5, 'rgba(182, 107, 255, 0.3)');
+    g.addColorStop(1, 'rgba(182, 107, 255, 0)');
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(0, 0, r * 1.8, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.rotate(this.time * 3);
+    ctx.lineWidth = Math.max(2, S * 0.014);
+    for (let i = 0; i < 3; i++) {
+      ctx.strokeStyle = ['#7df9ff', '#b36bff', '#ffffff'][i];
+      ctx.beginPath();
+      ctx.arc(0, 0, r * (1 - i * 0.25), i * 2, i * 2 + Math.PI * 1.3);
+      ctx.stroke();
+    }
+    ctx.restore();
+    const pulse = 0.6 + 0.4 * Math.sin(this.time * 6);
+    ctx.globalAlpha = pulse;
+    text(ctx, 'WARP', x, y - r * 2.1, S * 0.07, '#7df9ff', 900);
+    ctx.globalAlpha = 1;
+  }
+
+  private drawBoss(ctx: CanvasRenderingContext2D, b: Boss, S: number): void {
+    if (b.kind === 'worm') {
+      for (let i = WORM_SEGS - 1; i >= 0; i--) {
+        const sp = this.wormSegPos(b, i);
+        const r = (i === 0 ? 0.08 : 0.065 - i * 0.002) * S;
+        ctx.fillStyle = i === 0 ? '#c88bff' : i % 2 ? '#8a4be0' : '#a466f0';
+        ctx.beginPath();
+        ctx.arc(sp.x * S, sp.y * S, r, 0, Math.PI * 2);
+        ctx.fill();
+        if (i > 0) {
+          ctx.fillStyle = 'rgba(255,255,255,0.18)';
+          ctx.beginPath();
+          ctx.arc(sp.x * S - r * 0.3, sp.y * S - r * 0.3, r * 0.35, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+      // Face: eyes looking along its direction of travel.
+      const hd = this.wormSegPos(b, 0);
+      const dir = b.headA - Math.PI / 2;
+      for (const side of [-1, 1]) {
+        const ex = hd.x * S + Math.cos(dir) * S * 0.03 + Math.cos(b.headA) * side * S * 0.03;
+        const ey = hd.y * S + Math.sin(dir) * S * 0.03 + Math.sin(b.headA) * side * S * 0.03;
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.arc(ex, ey, S * 0.022, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#1a0b2e';
+        ctx.beginPath();
+        ctx.arc(ex + Math.cos(dir) * S * 0.008, ey + Math.sin(dir) * S * 0.008, S * 0.011, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      // Warning as it closes in.
+      if (wrap(b.headA - this.angle) < (this.speed + WORM_SPEED) * 1.0) {
+        const pulse = 0.5 + 0.5 * Math.sin(this.time * 14);
+        ctx.globalAlpha = pulse;
+        const rr = b.segR[0] + 0.16;
+        text(ctx, '!', Math.cos(b.headA) * rr * S, Math.sin(b.headA) * rr * S, S * 0.1, '#ff5d5d', 900);
+        ctx.globalAlpha = 1;
+      }
+    } else {
+      const u = this.ufoPos();
+      const x = u.x * S;
+      const y = u.y * S;
+      const r = S * 0.13;
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.fillStyle = 'rgba(125, 249, 255, 0.8)';
+      ctx.beginPath();
+      ctx.ellipse(0, -r * 0.2, r * 0.45, r * 0.4, 0, Math.PI, 0);
+      ctx.fill();
+      const g = ctx.createLinearGradient(0, -r * 0.3, 0, r * 0.3);
+      g.addColorStop(0, '#e8e8f5');
+      g.addColorStop(1, '#6d6d8a');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, r, r * 0.32, 0, 0, Math.PI * 2);
+      ctx.fill();
+      for (let i = 0; i < 5; i++) {
+        const on = Math.floor(this.time * 8 + i) % 2 === 0;
+        ctx.fillStyle = on ? '#ff5d5d' : '#ffd166';
+        ctx.beginPath();
+        ctx.arc((-0.6 + i * 0.3) * r, r * 0.08, r * 0.07, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+  }
+
   private drawShip(ctx: CanvasRenderingContext2D, x: number, y: number, r: number, skinId: string, trail: { x: number; y: number }[], alpha = 1): void {
     const skin = skinById(skinId);
     const n = trail.length;
@@ -1239,6 +2101,20 @@ export class Game {
     this.drawShip(ctx, p.x * S, p.y * S, PLAYER_R * S, this.profile.skin, this.trail.map((t) => ({ x: t.x * S, y: t.y * S })), blink);
 
     if (this.state !== 'playing' && this.state !== 'paused') return;
+    if (this.lanes.length > 2 && this.phase !== 'warp') {
+      // Arrow showing which way the next tap moves (in or out).
+      const dirA = Math.atan2(p.y, p.x);
+      const out = this.laneDir > 0 ? 1 : -1;
+      const base = this.radius + out * 0.1;
+      const tip = this.radius + out * 0.17;
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(dirA) * tip * S, Math.sin(dirA) * tip * S);
+      ctx.lineTo(Math.cos(dirA + 0.05) * base * S, Math.sin(dirA + 0.05) * base * S);
+      ctx.lineTo(Math.cos(dirA - 0.05) * base * S, Math.sin(dirA - 0.05) * base * S);
+      ctx.closePath();
+      ctx.fill();
+    }
     if (this.shield) {
       const r = PLAYER_R * S * (1.75 + Math.sin(this.time * 6) * 0.08);
       ctx.strokeStyle = 'rgba(125, 249, 255, 0.85)';
@@ -1425,7 +2301,7 @@ export class Game {
     const { cx, base } = this;
     const top = this.safe.top + 36;
     this.iconButton(ctx, btn('pause') ?? { id: 'pause', x: this.safe.left + 14, y: this.safe.top + 14, w: 44, h: 44 }, 'pause');
-    text(ctx, `BEST ${Math.max(this.best, this.score)}`, cx, top, base * 0.04, 'rgba(255,255,255,0.55)', 700);
+    this.drawJourney(ctx, top);
 
     // Multiplier and progress to the next one.
     const mx = this.w - this.safe.right - 44;
@@ -1444,10 +2320,12 @@ export class Game {
     });
 
     if (this.banner.life > 0) {
-      const a = Math.min(1, this.banner.life * 2, (2.2 - this.banner.life) * 4);
-      const y = this.safe.top + 90;
+      const a = Math.min(1, this.banner.life * 2);
+      const y = this.safe.top + 100;
       ctx.globalAlpha = a;
-      text(ctx, this.banner.title, cx, y, base * 0.08, '#7df9ff', 900);
+      const warn = this.banner.title === 'WARNING!';
+      const size = base * Math.min(0.08, 0.9 / Math.max(8, this.banner.title.length));
+      text(ctx, this.banner.title, cx, y, warn ? size * (1 + 0.08 * Math.sin(this.time * 12)) : size, warn ? '#ff5d5d' : '#7df9ff', 900);
       text(ctx, this.banner.sub, cx, y + base * 0.065, base * 0.04, 'rgba(255,255,255,0.8)', 700);
       ctx.globalAlpha = 1;
     }
@@ -1474,6 +2352,41 @@ export class Game {
       if (r) button(ctx, r, this.reviving ? 'GO!' : 'RESUME', true);
       if (h) button(ctx, h, 'HOME', false);
     }
+  }
+
+  /** Top-of-screen progress: planet progress, boss health, or warp. */
+  private drawJourney(ctx: CanvasRenderingContext2D, top: number): void {
+    const { cx, base } = this;
+    const bw = Math.min(150, base * 0.36);
+    let label = '';
+    let frac = 0;
+    let color = '#7df9ff';
+    switch (this.phase) {
+      case 'stage':
+        label = `${this.stats.planets}. ${this.planet.name.toUpperCase()}`;
+        frac = this.stageFrac();
+        break;
+      case 'gate':
+        label = 'WARP GATE AHEAD';
+        frac = 1;
+        color = `rgba(125, 249, 255, ${0.5 + 0.5 * Math.sin(this.time * 6)})`;
+        break;
+      case 'bossIntro':
+      case 'boss': {
+        const info = BOSSES[this.planet.boss!];
+        label = info.name;
+        frac = this.boss ? 1 - this.boss.t / BOSS_DUR : 1;
+        color = info.color;
+        break;
+      }
+      case 'warp':
+        label = 'WARP';
+        frac = this.phaseT / WARP_DUR;
+        text(ctx, String(this.score), cx, top + 46, base * 0.1, this.timers.double > 0 ? '#ffd166' : '#ffffff', 900);
+        break;
+    }
+    text(ctx, label, cx, top - 6, base * 0.036, 'rgba(255,255,255,0.75)', 800);
+    progressBar(ctx, cx - bw / 2, top + 8, bw, 6, frac, color);
   }
 
   private drawGameOver(ctx: CanvasRenderingContext2D, btn: (id: string) => Btn | undefined): void {

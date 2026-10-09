@@ -90,6 +90,57 @@ export class Sfx {
     this.tone(700, 800, 0.04, 'triangle', 0.15);
   }
 
+  private noise(dur: number, from: number, to: number, vol: number, type: BiquadFilterType = 'bandpass'): void {
+    if (!this.enabled || !this.ctx || !this.master) return;
+    const t = this.ctx.currentTime;
+    const len = Math.floor(this.ctx.sampleRate * dur);
+    const buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+    const src = this.ctx.createBufferSource();
+    src.buffer = buf;
+    const f = this.ctx.createBiquadFilter();
+    f.type = type;
+    f.frequency.setValueAtTime(from, t);
+    f.frequency.exponentialRampToValueAtTime(to, t + dur);
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(vol, t + dur * 0.3);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    src.connect(f).connect(g).connect(this.master);
+    src.start(t);
+  }
+
+  warp(): void {
+    this.noise(1.2, 300, 4000, 0.5);
+    this.tone(110, 880, 1.0, 'sawtooth', 0.08);
+  }
+
+  arrive(): void {
+    this.noise(0.6, 3000, 200, 0.35);
+    [0, 7, 12].forEach((n, i) => this.tone(392 * Math.pow(2, n / 12), 392 * Math.pow(2, n / 12), 0.25, 'triangle', 0.18, i * 0.09));
+  }
+
+  siren(): void {
+    for (let i = 0; i < 4; i++) {
+      this.tone(520, 520, 0.22, 'square', 0.1, i * 0.5);
+      this.tone(390, 390, 0.22, 'square', 0.1, i * 0.5 + 0.25);
+    }
+  }
+
+  laser(): void {
+    this.tone(1400, 180, 0.22, 'sawtooth', 0.12);
+  }
+
+  flare(): void {
+    this.noise(0.45, 500, 2500, 0.25, 'highpass');
+  }
+
+  bossDefeated(): void {
+    this.noise(0.9, 1500, 80, 0.6, 'lowpass');
+    [0, 4, 7, 12, 16, 19].forEach((n, i) => this.tone(330 * Math.pow(2, n / 12), 330 * Math.pow(2, n / 12), 0.3, 'triangle', 0.2, 0.2 + i * 0.09));
+  }
+
   crash(): void {
     if (!this.enabled || !this.ctx || !this.master) return;
     const t = this.ctx.currentTime;

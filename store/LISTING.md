@@ -19,23 +19,25 @@ If that name is taken, try `Orbit Dash – Space Arcade` or `Orbit Dash`.
 ```
 One tap. Two orbits. How long can you survive?
 
-Your ship races around a glowing planet. Tap anywhere to jump between the inner and outer orbit. Dodge the red rocks and incoming comets, grab the gold gems, and keep going as the ship gets faster and faster.
+Your ship races around a glowing planet. Tap anywhere to jump between orbits, dodge everything in your path, and fly through the warp gate to the next world. How far across the galaxy can you get?
 
 Simple to learn, hard to master. It's perfect for a quick break.
 
 FEATURES
 • One-tap controls: play with a single thumb
+• Planet hopping: warp between 6 worlds, each with its own twist: erupting solar flares on Lava World, slippery orbits on Ice World, three orbits around the Gas Giant, shrinking orbits at the Black Hole, and a comet storm at the Pulsar
+• Boss fights: outlast the Space Worm and the Laser UFO for big rewards
+• Warp flights: dodge debris as you race between planets
 • Power-ups: Shield, Gem Magnet, Slow-Mo and Double Points
 • Combo multiplier up to x5: chain gems to multiply every point
 • Close-call bonuses for last-second dodges
-• Six zones, each with its own colours, and the ship gets faster in every one
 • Missions that reward you with gems
 • Unlock six ship skins with unique trails
 • Satisfying haptics and retro sound effects
 • Works offline, so you can play anywhere
 • No account needed, plus an optional one-time Remove Ads purchase
 
-Can you reach Zone 6?
+Can you make it past the Pulsar?
 ```
 
 ---
@@ -52,7 +54,7 @@ Can you reach Zone 6?
 | Secondary category | Games → Casual |
 | Price | Free |
 | Keywords (100) | `arcade,one tap,space,planet,galaxy,dodge,reflex,casual,endless,offline,hyper casual,gems` |
-| Promotional text (170) | NEW: power-ups, missions, ship skins and comets! Jump between orbits, chain gems for a x5 combo and chase your best score. |
+| Promotional text (170) | Hop between 6 planets, fight a Space Worm and a Laser UFO, and chase your best score, all with just one tap! |
 | Copyright | 2026 Abdullah Alsaid |
 
 **Screenshots** (in `store/screenshots/`):
@@ -66,7 +68,7 @@ Can you reach Zone 6?
 - Reference name: `Remove Ads`, Product ID: **`remove_ads`** (must match exactly)
 - Price: $1.99 (Tier 2 or the price you choose)
 - Display name: `Remove Ads`, Description: `Removes all ads between games.`
-- Add a screenshot of the Shop screen (`store/screenshots/iphone-6.9-3-skins.png`) for review
+- Add a screenshot of the Shop screen (`store/screenshots/iphone-6.9-5-skins.png`) for review
 - You must accept the **Paid Apps Agreement** (Business section) and add bank/tax info before in-app purchases work
 
 **App Privacy** (because of Google AdMob). Check these against Google's current guide: https://developers.google.com/admob/ios/privacy/data-disclosure
