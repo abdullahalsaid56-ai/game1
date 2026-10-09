@@ -14,6 +14,7 @@
     "assets": "capacitor-assets generate --ios --android --iconBackgroundColor '#0b0d1f' --splashBackgroundColor '#0b0d1f'"
   },
   "dependencies": {
+    "@capacitor-community/admob": "^8.2.1",
     "@capacitor/android": "^8.5.3",
     "@capacitor/app": "^8.1.2",
     "@capacitor/core": "^8.5.3",
@@ -21,7 +22,8 @@
     "@capacitor/ios": "^8.5.3",
     "@capacitor/preferences": "^8.0.1",
     "@capacitor/splash-screen": "^8.0.2",
-    "@capacitor/status-bar": "^8.0.4"
+    "@capacitor/status-bar": "^8.0.4",
+    "@capgo/native-purchases": "^8.9.2"
   },
   "devDependencies": {
     "@capacitor/assets": "^3.0.5",

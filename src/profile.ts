@@ -19,6 +19,7 @@ export interface Profile {
   missionLevel: number;
   missions: MissionState[];
   tutorialDone: boolean;
+  adsRemoved: boolean;
 }
 
 const KEY = 'orbitdash.profile';
@@ -36,6 +37,7 @@ export function defaultProfile(): Profile {
     missionLevel: 0,
     missions: [],
     tutorialDone: false,
+    adsRemoved: false,
   };
 }
 

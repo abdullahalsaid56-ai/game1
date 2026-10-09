@@ -1,12 +1,13 @@
 import './style.css';
 import { Game } from './game';
+import { money } from './monetize';
 import { initNative, onBackButton, onLifecycle } from './native';
 
 const canvas = document.getElementById('game') as HTMLCanvasElement;
 const ctx = canvas.getContext('2d')!;
 const probe = document.getElementById('safe-area-probe')!;
 const game = new Game();
-if (import.meta.env.DEV) (window as unknown as { __game: Game }).__game = game;
+if (import.meta.env.DEV) Object.assign(window, { __game: game, __money: money });
 
 function readSafeArea() {
   const cs = getComputedStyle(probe);

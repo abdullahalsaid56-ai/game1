@@ -12,6 +12,7 @@ import {
   type RunStats,
   type Theme,
 } from './content';
+import { money } from './monetize';
 import { crashHaptic, gemHaptic, tapHaptic } from './native';
 import { defaultProfile, loadProfile, saveProfile, type MissionState, type Profile } from './profile';
 import { FONT, button, gemAmount, gemIcon, hit, powerIcon, progressBar, roundRect, text, timerRing, trailColor, type Rect } from './ui';
@@ -143,6 +144,15 @@ export class Game {
   // shop
   private shopShake = { id: '', t: 0 };
 
+  // ads
+  private busy = false; // an ad is showing (or loading) - ignore input
+  private continueOffer = 0; // seconds left on the "continue?" offer
+  private usedContinue = false;
+  private reviving = false; // paused screen shown after a revive
+  private doubledGems = false;
+  private finalized = false; // the current run has been recorded
+  private simAd: { kind: string; t: number; done: () => void } | null = null;
+
   // fx
   private particles: Particle[] = [];
   private texts: FloatText[] = [];
@@ -166,6 +176,22 @@ export class Game {
     this.profile = await loadProfile();
     this.sfx.enabled = this.profile.sound;
     this.replaceDoneMissions();
+
+    money.onAdOpen = () => {
+      this.busy = true;
+      this.sfx.suspend();
+    };
+    money.onAdClose = () => {
+      this.busy = false;
+    };
+    money.onAdsRemoved = () => {
+      this.profile.adsRemoved = true;
+      saveProfile(this.profile);
+    };
+    money.onSimulatedAd = (kind, done) => {
+      this.simAd = { kind, t: 0, done };
+    };
+    void money.init(this.profile.adsRemoved);
   }
 
   private get best(): number {
@@ -209,16 +235,37 @@ export class Game {
       case 'paused':
         return [
           { id: 'resume', x: cx - bw / 2, y: this.cy + base * 0.08, w: bw, h: bh },
-          { id: 'home', x: cx - bw / 2, y: this.cy + base * 0.08 + bh + 14, w: bw, h: bh },
+          ...(this.reviving ? [] : [{ id: 'home', x: cx - bw / 2, y: this.cy + base * 0.08 + bh + 14, w: bw, h: bh }]),
         ];
-      case 'over':
+      case 'over': {
+        if (this.busy) return [];
+        if (this.continueOffer > 0) {
+          const y = this.cy + base * 0.16;
+          return [
+            { id: 'continue', x: cx - bw * 0.65, y, w: bw * 1.3, h: bh },
+            { id: 'decline', x: cx - bw / 2, y: y + bh + 14, w: bw, h: bh * 0.8 },
+          ];
+        }
         if (this.overTime < 0.6) return [];
-        return [
+        const list: Btn[] = [
           { id: 'retry', x: cx - bw - 8, y: bottom - bh - 28, w: bw, h: bh },
           { id: 'home', x: cx + 8, y: bottom - bh - 28, w: bw, h: bh },
         ];
-      case 'shop':
-        return [icon('back', this.safe.left + 36), ...this.shopCards()];
+        if (this.canDoubleGems) list.push({ id: 'double', x: cx - bw * 0.9, y: bottom - bh * 1.85 - 44, w: bw * 1.8, h: bh * 0.85 });
+        return list;
+      }
+      case 'shop': {
+        const extra: Btn[] = [];
+        if (money.storeAvailable) {
+          const width = Math.min(this.w - 32, 460);
+          const left = (this.w - width) / 2;
+          const y = this.safe.top + 72;
+          extra.push({ id: 'removeAds', x: left, y, w: width, h: 52 });
+          extra.push({ id: 'restore', x: left, y: y + 58, w: width / 2 - 6, h: 30 });
+          if (money.showPrivacyOptions) extra.push({ id: 'privacy', x: left + width / 2 + 6, y: y + 58, w: width / 2 - 6, h: 30 });
+        }
+        return [icon('back', this.safe.left + 36), ...extra, ...this.shopCards()];
+      }
       case 'missions':
         return [icon('back', this.safe.left + 36)];
     }
@@ -229,7 +276,7 @@ export class Game {
     const cols = 2;
     const width = Math.min(this.w - 32, 460);
     const cw = (width - gap * (cols - 1)) / cols;
-    const top = this.safe.top + 110;
+    const top = this.safe.top + (money.storeAvailable ? 180 : 110);
     const avail = this.h - this.safe.bottom - 24 - top;
     const ch = Math.min(cw * 0.95, (avail - gap * 2) / 3);
     const left = (this.w - width) / 2;
@@ -246,6 +293,7 @@ export class Game {
 
   pointerDown(x: number, y: number): void {
     this.sfx.unlock();
+    if (this.busy || this.simAd) return;
     const b = this.buttons().find((btn) => hit(btn, x, y));
     if (b) {
       this.press(b.id);
@@ -273,11 +321,37 @@ export class Game {
         this.pause();
         break;
       case 'resume':
-      case 'retry':
         this.action();
         break;
+      case 'retry':
+        void this.leaveOver('retry');
+        break;
       case 'home':
-        this.goHome();
+        if (this.state === 'over') {
+          void this.leaveOver('home');
+        } else {
+          // Quitting mid-run still counts the run (gems, best score).
+          if (this.state === 'paused') this.finalizeRun();
+          this.goHome();
+        }
+        break;
+      case 'continue':
+        void this.watchToContinue();
+        break;
+      case 'decline':
+        this.finalizeRun();
+        break;
+      case 'double':
+        void this.watchToDoubleGems();
+        break;
+      case 'removeAds':
+        if (money.canBuy) void this.buyRemoveAds();
+        break;
+      case 'restore':
+        void this.restorePurchases();
+        break;
+      case 'privacy':
+        void money.openPrivacyOptions();
         break;
       case 'shop':
         this.state = 'shop';
@@ -294,6 +368,7 @@ export class Game {
   /** The single game action: start / switch lane / resume / retry. */
   action(): void {
     this.sfx.unlock();
+    if (this.busy || this.simAd) return;
     switch (this.state) {
       case 'menu':
         this.start();
@@ -303,9 +378,10 @@ export class Game {
         break;
       case 'paused':
         this.state = 'playing';
+        this.reviving = false;
         break;
       case 'over':
-        if (this.overTime > 0.6) this.start();
+        if (this.continueOffer <= 0 && this.overTime > 0.6) void this.leaveOver('retry');
         break;
       default:
         break;
@@ -318,13 +394,19 @@ export class Game {
 
   /** Android back button. Returns true if handled (false lets the app exit). */
   back(): boolean {
+    if (this.busy || this.simAd) return true;
     switch (this.state) {
       case 'playing':
         this.pause();
         return true;
       case 'paused':
-      case 'over':
+        if (this.reviving) return true;
+        this.finalizeRun();
         this.goHome();
+        return true;
+      case 'over':
+        if (this.continueOffer > 0) this.finalizeRun();
+        else void this.leaveOver('home');
         return true;
       case 'shop':
       case 'missions':
@@ -390,6 +472,11 @@ export class Game {
     this.switches = 0;
     this.stats = emptyStats();
     this.newBest = false;
+    this.usedContinue = false;
+    this.continueOffer = 0;
+    this.reviving = false;
+    this.doubledGems = false;
+    this.finalized = false;
     this.zone = this.prevZone = 0;
     this.zoneFade = 1;
     this.banner.life = 0;
@@ -442,6 +529,17 @@ export class Game {
     const pos = this.playerPos();
     this.burst(pos.x, pos.y, 46, ['#ffffff', skinById(p.skin).glow, '#ff6b6b', '#ffd166'], 1.6);
 
+    // Offer one "watch an ad to continue" per run, once the run is worth saving.
+    if (!this.usedContinue && this.score >= 10 && money.rewardedReady) this.continueOffer = 5;
+    else this.finalizeRun();
+  }
+
+  /** Records the finished run: games played, gems, best score. */
+  private finalizeRun(): void {
+    const p = this.profile;
+    this.continueOffer = 0;
+    if (this.finalized) return;
+    this.finalized = true;
     p.gamesPlayed++;
     p.gems += this.stats.gems;
     if (this.score > p.best) {
@@ -449,6 +547,77 @@ export class Game {
       this.newBest = true;
     }
     saveProfile(p);
+  }
+
+  private get canDoubleGems(): boolean {
+    return !this.doubledGems && this.continueOffer <= 0 && this.stats.gems > 0 && money.rewardedReady;
+  }
+
+  private async watchToContinue(): Promise<void> {
+    this.busy = true;
+    const rewarded = await money.showRewarded();
+    this.busy = false;
+    if (rewarded) this.revive();
+    else this.finalizeRun();
+  }
+
+  /** Second chance: clear nearby hazards and wait for the player to tap. */
+  private revive(): void {
+    this.usedContinue = true;
+    this.continueOffer = 0;
+    for (const o of this.objs) {
+      const ahead = (o.kind === 'comet' ? o.target : o.a) - this.angle;
+      if (isHazard(o) && ahead > -0.6 && ahead < 2.2) {
+        o.dead = true;
+        const op = this.objPos(o);
+        this.burst(op.x, op.y, 12, ['#ff5d5d', '#ffffff'], 0.8);
+      }
+    }
+    this.objs = this.objs.filter((o) => !o.dead);
+    this.invuln = 2;
+    this.trail = [];
+    this.reviving = true;
+    this.state = 'paused';
+    this.sfx.powerUp();
+  }
+
+  private async watchToDoubleGems(): Promise<void> {
+    this.busy = true;
+    const rewarded = await money.showRewarded();
+    this.busy = false;
+    if (!rewarded) return;
+    this.doubledGems = true;
+    this.profile.gems += this.stats.gems;
+    saveProfile(this.profile);
+    this.showToast(`+${this.stats.gems} BONUS GEMS!`, '#ffd166');
+    this.sfx.buy();
+  }
+
+  /** Leaves the game-over screen, showing an interstitial first when it's due. */
+  private async leaveOver(next: 'retry' | 'home'): Promise<void> {
+    if (this.busy) return;
+    this.busy = true;
+    await money.afterGame(this.profile.gamesPlayed);
+    this.busy = false;
+    if (next === 'retry') this.start();
+    else this.goHome();
+  }
+
+  private async buyRemoveAds(): Promise<void> {
+    this.busy = true;
+    const ok = await money.buyRemoveAds();
+    this.busy = false;
+    if (ok) {
+      this.sfx.buy();
+      this.showToast('Ads removed. Thank you!', '#7dff6b');
+    }
+  }
+
+  private async restorePurchases(): Promise<void> {
+    this.busy = true;
+    const ok = await money.restore();
+    this.busy = false;
+    this.showToast(ok ? 'Purchases restored' : 'No purchases to restore', ok ? '#7dff6b' : '#ffffff');
   }
 
   // ------------------------------------------------------------------ update
@@ -462,6 +631,16 @@ export class Game {
     this.zoneFade = Math.min(1, this.zoneFade + dt / 1.5);
     this.shopShake.t = Math.max(0, this.shopShake.t - dt);
 
+    if (this.simAd) {
+      this.simAd.t += dt;
+      if (this.simAd.t >= 2) {
+        const done = this.simAd.done;
+        this.simAd = null;
+        done();
+      }
+      return;
+    }
+
     if (this.state === 'paused') return;
 
     if (this.state === 'menu' || this.state === 'shop' || this.state === 'missions') {
@@ -472,7 +651,13 @@ export class Game {
     }
 
     if (this.state === 'playing') this.updatePlaying(dt);
-    if (this.state === 'over') this.overTime += dt;
+    if (this.state === 'over') {
+      this.overTime += dt;
+      if (this.continueOffer > 0 && !this.busy) {
+        this.continueOffer -= dt;
+        if (this.continueOffer <= 0) this.finalizeRun();
+      }
+    }
 
     this.updateFx(dt);
   }
@@ -1127,10 +1312,25 @@ export class Game {
     // Toasts sit just above the orbit.
     if (this.toast.life > 0) {
       const a = Math.min(1, this.toast.life * 3);
-      const y = this.state === 'shop' ? this.h - this.safe.bottom - 14 : this.cy - this.scale - base * 0.06;
+      const y =
+        this.state === 'shop'
+          ? this.h - this.safe.bottom - 14
+          : this.state === 'over'
+            ? this.h - this.safe.bottom - Math.min(56, base * 0.14) - 56
+            : this.cy - this.scale - base * 0.06;
       ctx.globalAlpha = a;
       text(ctx, this.toast.text, cx, y, base * 0.05, this.toast.color, 900);
       ctx.globalAlpha = 1;
+    }
+
+    if (this.simAd) {
+      // Dev builds only: stands in for a real AdMob ad.
+      ctx.fillStyle = '#000000';
+      ctx.fillRect(0, 0, this.w, this.h);
+      text(ctx, 'TEST AD', cx, this.cy - 30, base * 0.1, '#ffffff', 900);
+      text(ctx, this.simAd.kind === 'rewarded' ? 'Rewarded video' : 'Interstitial', cx, this.cy + 10, base * 0.045, 'rgba(255,255,255,0.7)', 700);
+      text(ctx, `${Math.ceil(2 - this.simAd.t)}`, cx, this.cy + 60, base * 0.07, '#7dff6b', 900);
+      text(ctx, '(simulated: real ads only appear in the app)', cx, this.h - this.safe.bottom - 40, base * 0.035, 'rgba(255,255,255,0.4)', 600);
     }
   }
 
@@ -1216,7 +1416,7 @@ export class Game {
     const playY = (this.cy + this.scale + shop.y) / 2;
     text(ctx, 'TAP TO PLAY', cx, playY, base * 0.055, `rgba(255,255,255,${pulse})`, 800);
 
-    button(ctx, shop, 'SKINS', false);
+    button(ctx, shop, 'SHOP', false);
     const ms = btn('missions')!;
     button(ctx, ms, 'MISSIONS', false);
   }
@@ -1268,10 +1468,10 @@ export class Game {
 
     if (this.state === 'paused') {
       this.dim(ctx, 0.7);
-      text(ctx, 'PAUSED', cx, this.cy - base * 0.08, base * 0.12, '#ffffff', 900);
+      text(ctx, this.reviving ? 'READY?' : 'PAUSED', cx, this.cy - this.scale * 0.3 - base * 0.12, base * 0.12, '#ffffff', 900);
       const r = btn('resume');
       const h = btn('home');
-      if (r) button(ctx, r, 'RESUME', true);
+      if (r) button(ctx, r, this.reviving ? 'GO!' : 'RESUME', true);
       if (h) button(ctx, h, 'HOME', false);
     }
   }
@@ -1283,7 +1483,16 @@ export class Game {
     ctx.globalAlpha = a;
     const top = this.safe.top;
     const bottom = this.h - this.safe.bottom;
-    const retryY = bottom - Math.min(56, base * 0.14) - 28;
+    const bh = Math.min(56, base * 0.14);
+    const dbl = btn('double');
+    const retryY = (dbl ? dbl.y : bottom - bh - 28) - (dbl ? 4 : 0);
+
+    if (this.continueOffer > 0 || (this.busy && !this.finalized)) {
+      this.dim(ctx, 0.6 * a);
+      this.drawContinueOffer(ctx, btn);
+      ctx.globalAlpha = 1;
+      return;
+    }
 
     let y = top + Math.max(50, (this.h - top - this.safe.bottom) * 0.09);
     text(ctx, 'GAME OVER', cx, y, base * 0.08, '#ff6b6b', 900);
@@ -1297,7 +1506,7 @@ export class Game {
       text(ctx, `BEST ${this.best}`, cx, y, base * 0.05, '#ffd166', 800);
     }
     y += base * 0.09;
-    gemAmount(ctx, `+${this.stats.gems}`, cx, y, base * 0.05);
+    gemAmount(ctx, `+${this.stats.gems * (this.doubledGems ? 2 : 1)}`, cx, y, base * 0.05);
 
     // Missions
     y += base * 0.08;
@@ -1308,7 +1517,53 @@ export class Game {
     const h = btn('home');
     if (r) button(ctx, r, 'RETRY', true);
     if (h) button(ctx, h, 'HOME', false);
+    if (dbl) this.adButton(ctx, dbl, `DOUBLE GEMS (+${this.stats.gems})`);
     ctx.globalAlpha = 1;
+  }
+
+  /** "Continue?" screen with a countdown ring, shown right after a crash. */
+  private drawContinueOffer(ctx: CanvasRenderingContext2D, btn: (id: string) => Btn | undefined): void {
+    const { cx, base } = this;
+    const y = this.cy - base * 0.12;
+    text(ctx, 'CONTINUE?', cx, y - base * 0.24, base * 0.1, '#ffffff', 900);
+    text(ctx, `Score ${this.score}`, cx, y - base * 0.14, base * 0.045, 'rgba(255,255,255,0.7)', 700);
+    const r = base * 0.11;
+    ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+    ctx.lineWidth = 6;
+    ctx.beginPath();
+    ctx.arc(cx, y + base * 0.04, r, 0, Math.PI * 2);
+    ctx.stroke();
+    timerRing(ctx, cx, y + base * 0.04, r, Math.max(0, this.continueOffer) / 5, '#7dff6b');
+    text(ctx, String(Math.max(1, Math.ceil(this.continueOffer))), cx, y + base * 0.045, r * 1.1, '#ffffff', 900);
+    const c = btn('continue');
+    const d = btn('decline');
+    if (c) this.adButton(ctx, c, 'KEEP GOING');
+    if (d) text(ctx, 'No thanks', d.x + d.w / 2, d.y + d.h / 2, base * 0.042, 'rgba(255,255,255,0.6)', 700);
+  }
+
+  /** Green button with a small "play video" badge: marks a rewarded ad. */
+  private adButton(ctx: CanvasRenderingContext2D, b: Btn, label: string): void {
+    roundRect(ctx, b.x, b.y, b.w, b.h, b.h / 2);
+    const g = ctx.createLinearGradient(0, b.y, 0, b.y + b.h);
+    g.addColorStop(0, '#b6ff9f');
+    g.addColorStop(1, '#4fd66a');
+    ctx.fillStyle = g;
+    ctx.fill();
+    const iconR = b.h * 0.26;
+    const ix = b.x + b.h * 0.55;
+    const iy = b.y + b.h / 2;
+    ctx.fillStyle = '#0b0d1f';
+    ctx.beginPath();
+    ctx.arc(ix, iy, iconR, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#b6ff9f';
+    ctx.beginPath();
+    ctx.moveTo(ix - iconR * 0.35, iy - iconR * 0.5);
+    ctx.lineTo(ix + iconR * 0.55, iy);
+    ctx.lineTo(ix - iconR * 0.35, iy + iconR * 0.5);
+    ctx.closePath();
+    ctx.fill();
+    text(ctx, label, b.x + b.w / 2 + b.h * 0.35, iy + 1, Math.min(b.h * 0.36, (b.w - b.h * 1.3) / label.length * 1.75), '#0b0d1f', 900);
   }
 
   private missionRows(ctx: CanvasRenderingContext2D, y: number, rowH: number): void {
@@ -1351,9 +1606,35 @@ export class Game {
   private drawShop(ctx: CanvasRenderingContext2D, btns: Btn[]): void {
     const { cx, base } = this;
     const top = this.safe.top + 36;
-    text(ctx, 'SKINS', cx, top, base * 0.065, '#ffffff', 900);
+    text(ctx, 'SHOP', cx, top, base * 0.065, '#ffffff', 900);
     this.wallet(ctx, this.w - this.safe.right - 16, top);
-    text(ctx, 'Collect gems while you play to unlock ships', cx, this.safe.top + 84, base * 0.036, 'rgba(255,255,255,0.65)', 600);
+    const ra = btns.find((b) => b.id === 'removeAds');
+    if (ra) {
+      roundRect(ctx, ra.x, ra.y, ra.w, ra.h, 14);
+      ctx.fillStyle = money.adsRemoved ? 'rgba(125, 255, 107, 0.12)' : 'rgba(255, 107, 214, 0.16)';
+      ctx.fill();
+      ctx.strokeStyle = money.adsRemoved ? 'rgba(125, 255, 107, 0.5)' : 'rgba(255, 107, 214, 0.6)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      const my = ra.y + ra.h / 2;
+      if (money.adsRemoved) {
+        text(ctx, '✓ ADS REMOVED · THANK YOU!', cx, my, 16, '#7dff6b', 900);
+      } else {
+        text(ctx, 'REMOVE ADS', ra.x + 16, my - 8, 17, '#ffffff', 900, 'left');
+        text(ctx, 'No more ads between games', ra.x + 16, my + 11, 12, 'rgba(255,255,255,0.65)', 600, 'left');
+        const pw = 86;
+        roundRect(ctx, ra.x + ra.w - pw - 10, my - 16, pw, 32, 16);
+        ctx.fillStyle = '#ff6bd6';
+        ctx.fill();
+        text(ctx, money.removeAdsPrice, ra.x + ra.w - pw / 2 - 10, my + 1, 16, '#0b0d1f', 900);
+      }
+      for (const id of ['restore', 'privacy']) {
+        const b = btns.find((x) => x.id === id);
+        if (b) text(ctx, id === 'restore' ? 'Restore purchases' : 'Ad privacy choices', b.x + b.w / 2, b.y + b.h / 2, 13, 'rgba(255,255,255,0.55)', 700);
+      }
+    } else {
+      text(ctx, 'Collect gems while you play to unlock ships', cx, this.safe.top + 84, base * 0.036, 'rgba(255,255,255,0.65)', 600);
+    }
 
     const p = this.profile;
     for (const b of btns) {
