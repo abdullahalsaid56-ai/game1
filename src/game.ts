@@ -15,8 +15,33 @@ import {
   type RunStats,
   type Theme,
 } from './content';
+import {
+  DAILY_REWARDS,
+  MAX_STATION_LEVEL,
+  STATION_INFO,
+  UPGRADES,
+  addXp,
+  buildStation,
+  buyUpgrade,
+  claimDaily,
+  collect,
+  collectAll,
+  dailyAvailable,
+  nextFullAt,
+  pendingGems,
+  rankReward,
+  stationCap,
+  stationRate,
+  tickStations,
+  upgradeCost,
+  upgradeLevel,
+  upgradeStation,
+  xpForRun,
+  xpToNext,
+  type UpgradeId,
+} from './meta';
 import { money } from './monetize';
-import { crashHaptic, gemHaptic, tapHaptic } from './native';
+import { askNotificationPermission, crashHaptic, gemHaptic, scheduleReminders, tapHaptic } from './native';
 import { defaultProfile, loadProfile, saveProfile, type MissionState, type Profile } from './profile';
 import { FONT, button, gemAmount, gemIcon, hit, powerIcon, progressBar, roundRect, text, timerRing, trailColor, type Rect } from './ui';
 
@@ -55,7 +80,8 @@ const GEMS_PER_MULT = 4;
 const MAX_MULT = 5;
 const CLOSE_CALL = 0.45; // radians: switching away this close to a hazard counts as a close call
 
-type State = 'menu' | 'shop' | 'missions' | 'playing' | 'paused' | 'over';
+type State = 'menu' | 'shop' | 'missions' | 'galaxy' | 'hangar' | 'playing' | 'paused' | 'over';
+type Modal = { kind: 'daily'; day: number } | { kind: 'welcome'; gems: number };
 type Kind = 'rock' | 'gem' | 'comet' | 'power' | 'flare' | 'beam' | 'gate';
 /** Phases of a run on each planet. */
 type Phase = 'stage' | 'bossIntro' | 'boss' | 'gate' | 'warp';
@@ -188,6 +214,15 @@ export class Game {
   // shop
   private shopShake = { id: '', t: 0 };
 
+  // meta-game
+  private modals: Modal[] = [];
+  private selectedPlanet = 0;
+  private metaTick = 0;
+  private runXp = 0;
+  private ranksGained: number[] = [];
+  private discoveries: string[] = [];
+  private comboSaves = 0;
+
   // ads
   private busy = false; // an ad is showing (or loading) - ignore input
   private continueOffer = 0; // seconds left on the "continue?" offer
@@ -220,6 +255,7 @@ export class Game {
     this.profile = await loadProfile();
     this.sfx.enabled = this.profile.sound;
     this.replaceDoneMissions();
+    this.welcomeBack();
 
     money.onAdOpen = () => {
       this.busy = true;
@@ -236,6 +272,21 @@ export class Game {
       this.simAd = { kind, t: 0, done };
     };
     void money.init(this.profile.adsRemoved);
+  }
+
+  /** On launch / return: queue the daily reward and the stations' offline earnings. */
+  private welcomeBack(): void {
+    const p = this.profile;
+    const now = Date.now();
+    const away = now - p.lastSeen;
+    tickStations(p, now);
+    p.lastSeen = now;
+    if (this.state !== 'menu' && this.state !== 'galaxy' && this.state !== 'hangar') return;
+    const day = dailyAvailable(p);
+    if (day && !this.modals.some((m) => m.kind === 'daily')) this.modals.push({ kind: 'daily', day });
+    const gems = pendingGems(p);
+    if (away > 3 * 60_000 && gems >= 5 && p.gamesPlayed > 0 && !this.modals.some((m) => m.kind === 'welcome')) this.modals.push({ kind: 'welcome', gems });
+    saveProfile(p);
   }
 
   private get best(): number {
@@ -259,6 +310,16 @@ export class Game {
   }
 
   private buttons(): Btn[] {
+    if (this.modalOpen) return this.modalButtons();
+    return this.screenButtons();
+  }
+
+  private get modalOpen(): boolean {
+    return this.modals.length > 0 && (this.state === 'menu' || this.state === 'galaxy' || this.state === 'hangar');
+  }
+
+  /** Buttons of the current screen, ignoring any popup on top. */
+  private screenButtons(): Btn[] {
     const { w, base } = this;
     const top = this.safe.top + 14;
     const bottom = this.h - this.safe.bottom;
@@ -268,12 +329,22 @@ export class Game {
     const cx = this.cx;
 
     switch (this.state) {
-      case 'menu':
+      case 'menu': {
+        const gh = Math.min(52, base * 0.13);
+        const row2 = bottom - gh - 24;
+        const row1 = row2 - gh - 12;
         return [
           icon('sound', w - this.safe.right - 36),
-          { id: 'shop', x: cx - bw - 8, y: bottom - bh - 28, w: bw, h: bh },
-          { id: 'missions', x: cx + 8, y: bottom - bh - 28, w: bw, h: bh },
+          { id: 'galaxy', x: cx - bw - 8, y: row1, w: bw, h: gh },
+          { id: 'hangar', x: cx + 8, y: row1, w: bw, h: gh },
+          { id: 'shop', x: cx - bw - 8, y: row2, w: bw, h: gh },
+          { id: 'missions', x: cx + 8, y: row2, w: bw, h: gh },
         ];
+      }
+      case 'galaxy':
+        return [icon('back', this.safe.left + 36), ...this.galaxyButtons()];
+      case 'hangar':
+        return [icon('back', this.safe.left + 36), ...this.hangarButtons()];
       case 'playing':
         return [icon('pause', this.safe.left + 36)];
       case 'paused':
@@ -315,6 +386,61 @@ export class Game {
     }
   }
 
+  private modalRect(): Rect {
+    const mw = Math.min(this.w - 40, 360);
+    const mh = 330;
+    return { x: (this.w - mw) / 2, y: this.cy - mh / 2, w: mw, h: mh };
+  }
+
+  private modalButtons(): Btn[] {
+    const m = this.modals[0];
+    const r = this.modalRect();
+    const bw = r.w - 48;
+    if (m.kind === 'daily') return [{ id: 'claimDaily', x: r.x + 24, y: r.y + r.h - 74, w: bw, h: 52 }];
+    const list: Btn[] = [{ id: 'collectWelcome', x: r.x + 24, y: r.y + r.h - 74, w: bw, h: 52 }];
+    if (money.rewardedReady) list.push({ id: 'collectWelcome2x', x: r.x + 24, y: r.y + r.h - 136, w: bw, h: 52 });
+    return list;
+  }
+
+  /** Galaxy map layout: planets zig-zag upwards from Home, with a detail panel below. */
+  private galaxyLayout() {
+    const panelH = 164;
+    const panelY = this.h - this.safe.bottom - panelH - 12;
+    const areaTop = this.safe.top + 118;
+    const r = Math.max(14, Math.min(32, (panelY - areaTop) / PLANETS.length * 0.3));
+    const top = areaTop + r * 1.4;
+    const bottomY = panelY - r - 40;
+    const off = Math.min(this.w * 0.22, 120);
+    const step = (bottomY - top) / (PLANETS.length - 1);
+    const nodes = PLANETS.map((_, i) => ({ x: this.cx + (i % 2 === 0 ? -off : off) * (i === 0 ? 0.4 : 1), y: bottomY - i * step, r }));
+    const width = Math.min(this.w - 32, 460);
+    return { nodes, panel: { x: (this.w - width) / 2, y: panelY, w: width, h: panelH } };
+  }
+
+  private galaxyButtons(): Btn[] {
+    const { nodes, panel } = this.galaxyLayout();
+    const list: Btn[] = nodes.map((n, i) => ({ id: `planet:${i}`, x: n.x - n.r * 1.6, y: n.y - n.r * 1.3, w: n.r * 3.2, h: n.r * 2.9 }));
+    list.push({ id: 'collectAll', x: this.cx - 130, y: this.safe.top + 66, w: 260, h: 44 });
+    const p = this.profile;
+    const i = this.selectedPlanet;
+    const by = panel.y + panel.h - 60;
+    if (p.stations[i]) {
+      list.push({ id: 'collectOne', x: panel.x + 16, y: by, w: panel.w / 2 - 24, h: 44 });
+      list.push({ id: 'upgradeStation', x: panel.x + panel.w / 2 + 8, y: by, w: panel.w / 2 - 24, h: 44 });
+    } else if (p.discovered.includes(i)) {
+      list.push({ id: 'build', x: panel.x + 40, y: by, w: panel.w - 80, h: 44 });
+    }
+    return list;
+  }
+
+  private hangarButtons(): Btn[] {
+    const top = this.safe.top + 110;
+    const rowH = Math.min(92, (this.h - this.safe.bottom - 20 - top) / UPGRADES.length);
+    const width = Math.min(this.w - 32, 460);
+    const left = (this.w - width) / 2;
+    return UPGRADES.map((u, i) => ({ id: `upg:${u.id}`, x: left + width - 112, y: top + i * rowH + (rowH - 8) / 2 - 20, w: 100, h: 40 }));
+  }
+
   private shopCards(): Btn[] {
     const gap = 12;
     const cols = 2;
@@ -343,6 +469,7 @@ export class Game {
       this.press(b.id);
       return;
     }
+    if (this.modalOpen) return;
     if (this.state === 'menu' || this.state === 'playing' || this.state === 'paused') this.action();
   }
 
@@ -356,6 +483,15 @@ export class Game {
       this.selectSkin(id.slice(5));
       return;
     }
+    if (id.startsWith('planet:')) {
+      this.selectedPlanet = Number(id.slice(7));
+      return;
+    }
+    if (id.startsWith('upg:')) {
+      this.buyHangarUpgrade(id.slice(4) as UpgradeId);
+      return;
+    }
+    if (this.pressMeta(id)) return;
     switch (id) {
       case 'sound':
         this.profile.sound = this.sfx.enabled = !this.sfx.enabled;
@@ -403,6 +539,13 @@ export class Game {
       case 'missions':
         this.state = 'missions';
         break;
+      case 'galaxy':
+        tickStations(this.profile);
+        this.state = 'galaxy';
+        break;
+      case 'hangar':
+        this.state = 'hangar';
+        break;
       case 'back':
         this.state = 'menu';
         break;
@@ -412,7 +555,7 @@ export class Game {
   /** The single game action: start / switch lane / resume / retry. */
   action(): void {
     this.sfx.unlock();
-    if (this.busy || this.simAd) return;
+    if (this.busy || this.simAd || this.modalOpen) return;
     switch (this.state) {
       case 'menu':
         this.start();
@@ -454,6 +597,9 @@ export class Game {
         return true;
       case 'shop':
       case 'missions':
+      case 'galaxy':
+      case 'hangar':
+        if (this.modals.length) return true;
         this.state = 'menu';
         return true;
       default:
@@ -464,11 +610,114 @@ export class Game {
   onAppPause(): void {
     this.pause();
     this.sfx.suspend();
-    saveProfile(this.profile);
+    const p = this.profile;
+    tickStations(p);
+    p.lastSeen = Date.now();
+    saveProfile(p);
+    const full = Object.entries(p.stations).reduce((n, [k, st]) => n + stationCap(Number(k), st.level), 0);
+    const day = dailyAvailable(p, new Date(Date.now() + 86_400_000));
+    void scheduleReminders({ stationsFullAt: nextFullAt(p), fullGems: full, dailyDay: day || 1, streak: p.daily.streak });
   }
 
   onAppResume(): void {
     // Audio resumes on the next tap (unlock) to respect autoplay policies.
+    this.welcomeBack();
+  }
+
+  /** Galaxy, hangar and popup buttons. Returns true if handled. */
+  private pressMeta(id: string): boolean {
+    const p = this.profile;
+    switch (id) {
+      case 'collectAll': {
+        tickStations(p);
+        const n = collectAll(p);
+        if (n > 0) this.gemsCollected(n);
+        else this.showToast('Nothing to collect yet', '#ffffff');
+        break;
+      }
+      case 'collectOne': {
+        tickStations(p);
+        const n = collect(p, this.selectedPlanet);
+        if (n > 0) this.gemsCollected(n);
+        break;
+      }
+      case 'build':
+        if (buildStation(p, this.selectedPlanet)) {
+          this.sfx.buy();
+          gemHaptic();
+          this.showToast(`${PLANETS[this.selectedPlanet].name} station built!`, '#7dff6b');
+          if (!p.notificationsAsked) {
+            p.notificationsAsked = true;
+            void askNotificationPermission();
+          }
+        } else this.notEnough(STATION_INFO[this.selectedPlanet].build);
+        break;
+      case 'upgradeStation': {
+        const st = p.stations[this.selectedPlanet];
+        if (!st || st.level >= MAX_STATION_LEVEL) break;
+        const cost = upgradeCost(this.selectedPlanet, st.level);
+        if (upgradeStation(p, this.selectedPlanet)) {
+          this.sfx.buy();
+          gemHaptic();
+          this.showToast(`Station level ${st.level}!`, '#7dff6b');
+        } else this.notEnough(cost);
+        break;
+      }
+      case 'claimDaily': {
+        const n = claimDaily(p);
+        this.modals.shift();
+        if (n > 0) this.gemsCollected(n, `Day ${p.daily.streak} reward: +${n} gems!`);
+        break;
+      }
+      case 'collectWelcome':
+      case 'collectWelcome2x':
+        void this.collectWelcome(id === 'collectWelcome2x');
+        break;
+      default:
+        return false;
+    }
+    saveProfile(p);
+    return true;
+  }
+
+  private gemsCollected(n: number, msg = `+${n} gems collected!`): void {
+    this.sfx.buy();
+    gemHaptic();
+    this.showToast(msg, '#ffd166');
+  }
+
+  private notEnough(cost: number): void {
+    this.sfx.denied();
+    this.showToast(`Need ${cost - this.profile.gems} more gems`, '#ff8a8a');
+  }
+
+  private async collectWelcome(double: boolean): Promise<void> {
+    const p = this.profile;
+    if (double) {
+      this.busy = true;
+      const ok = await money.showRewarded();
+      this.busy = false;
+      if (!ok) return;
+    }
+    this.modals.shift();
+    tickStations(p);
+    const n = collectAll(p);
+    if (double) p.gems += n;
+    saveProfile(p);
+    this.gemsCollected(double ? n * 2 : n, `+${double ? n * 2 : n} gems collected!`);
+  }
+
+  private buyHangarUpgrade(id: UpgradeId): void {
+    const p = this.profile;
+    const u = UPGRADES.find((x) => x.id === id)!;
+    const lvl = upgradeLevel(p, id);
+    if (lvl >= u.costs.length) return;
+    if (buyUpgrade(p, id)) {
+      this.sfx.buy();
+      gemHaptic();
+      this.showToast(`${u.name} ${u.costs.length > 1 ? `level ${lvl + 1}` : 'unlocked'}!`, '#7dff6b');
+      saveProfile(p);
+    } else this.notEnough(u.costs[lvl]);
   }
 
   private selectSkin(id: string): void {
@@ -540,6 +789,11 @@ export class Game {
     this.replaceDoneMissions();
     this.reset();
     this.banked = this.profile.missions.map((m) => m.progress);
+    this.shield = upgradeLevel(this.profile, 'shieldStart') > 0;
+    this.comboSaves = upgradeLevel(this.profile, 'comboSaver');
+    this.runXp = 0;
+    this.ranksGained = [];
+    this.discoveries = [];
     this.state = 'playing';
     if (this.profile.tutorialDone) this.banner = { title: 'HOME', sub: 'Planet 1 · Fill the bar, then fly through the warp gate', life: 2.6 };
     tapHaptic();
@@ -614,6 +868,13 @@ export class Game {
     if (this.score > p.best) {
       p.best = this.score;
       this.newBest = true;
+    }
+    this.stats.score = this.score;
+    this.runXp = xpForRun(this.stats);
+    this.ranksGained = addXp(p, this.runXp);
+    if (this.ranksGained.length) {
+      this.showToast(`PILOT RANK ${p.rank}! +${this.ranksGained.reduce((n, r) => n + rankReward(r), 0)} gems`, '#7df9ff');
+      this.sfx.levelUp();
     }
     saveProfile(p);
   }
@@ -721,7 +982,15 @@ export class Game {
 
     if (this.state === 'paused') return;
 
-    if (this.state === 'menu' || this.state === 'shop' || this.state === 'missions') {
+    if (this.state === 'menu' || this.state === 'galaxy') {
+      this.metaTick += dt;
+      if (this.metaTick > 1) {
+        this.metaTick = 0;
+        tickStations(this.profile);
+      }
+    }
+
+    if (this.state === 'menu' || this.state === 'shop' || this.state === 'missions' || this.state === 'galaxy' || this.state === 'hangar') {
       // Idle demo orbit behind the menus.
       this.angle += dt * 1.1;
       this.radius += (TWO_LANES[1] - this.radius) * (1 - Math.exp(-dt * LANE_EASE));
@@ -855,9 +1124,7 @@ export class Game {
           if (o.kind === 'comet') this.stats.comets++;
           this.sfx.pass();
         } else if (o.kind === 'gem') {
-          if (this.mult > 1) this.addText(`x${this.mult} lost`, p.x, p.y, '#ff8a8a', 0.06);
-          this.streak = 0;
-          this.mult = 1;
+          this.missedGem();
         }
       }
     }
@@ -979,8 +1246,7 @@ export class Game {
           this.addPoints(1);
           this.sfx.pass();
         } else if (o.kind === 'gem') {
-          this.streak = 0;
-          this.mult = 1;
+          this.missedGem();
         }
       }
     }
@@ -994,7 +1260,7 @@ export class Game {
     const lane = Math.random() < 0.5 ? 0 : 1;
     const q = Math.random();
     this.addObj(0, lane, 'rock', { y: top });
-    if (q < 0.1) this.addObj(0, 1 - lane, 'power', { y: top, power: this.pickPower() });
+    if (q < 0.1 * this.luck) this.addObj(0, 1 - lane, 'power', { y: top, power: this.pickPower() });
     else if (q < 0.55) this.addObj(0, 1 - lane, 'gem', { y: top });
     this.warpNext += Math.max(0.42, 0.6 - this.level * 0.015) + Math.random() * 0.22;
   }
@@ -1018,6 +1284,12 @@ export class Game {
     this.nextSpawn = this.angle + SPAWN_LEAD + 0.5;
     this.stageEnd = this.progress + STAGE_LEN;
     this.banner = { title: this.planet.name.toUpperCase(), sub: `Planet ${this.stats.planets} · ${this.planet.hint}`, life: 3 };
+    if (!this.profile.discovered.includes(this.planetIdx)) {
+      this.profile.discovered.push(this.planetIdx);
+      this.discoveries.push(this.planet.name);
+      this.showToast('NEW PLANET DISCOVERED!', '#7dff6b');
+      saveProfile(this.profile);
+    }
     this.flash = 0.4;
     this.sfx.arrive();
   }
@@ -1204,17 +1476,37 @@ export class Game {
       this.showToast(`MULTIPLIER x${mult}`, '#ffd166');
     }
     this.stats.gems++;
+    if (Math.random() < 0.1 * upgradeLevel(this.profile, 'gemBonus')) {
+      this.stats.gems++;
+      this.addText('GEM x2', p.x, p.y - 0.08, '#fff3b0', 0.07);
+    }
     this.addPoints(3, p.x, p.y, '#ffd166');
     this.burst(p.x, p.y, 10, ['#ffd166', '#fff3b0'], 0.6);
     this.sfx.gem(this.streak);
     gemHaptic();
   }
 
+  private missedGem(): void {
+    if (this.mult <= 1) {
+      this.streak = 0;
+      return;
+    }
+    const p = this.playerPos();
+    if (this.comboSaves > 0) {
+      this.comboSaves--;
+      this.addText('COMBO SAVED', p.x, p.y, '#7df9ff', 0.06);
+      return;
+    }
+    this.addText(`x${this.mult} lost`, p.x, p.y, '#ff8a8a', 0.06);
+    this.streak = 0;
+    this.mult = 1;
+  }
+
   private collectPower(o: Obj, at: { x: number; y: number }): void {
     o.dead = true;
     const info = POWERS[o.power];
     if (o.power === 'shield') this.shield = true;
-    else this.timers[o.power] = info.duration;
+    else this.timers[o.power] = info.duration + (o.power === 'magnet' ? 1.5 * upgradeLevel(this.profile, 'magnet') : 0);
     this.stats.powerups++;
     this.showToast(info.name, info.color);
     this.burst(at.x, at.y, 22, [info.color, '#ffffff'], 1);
@@ -1308,14 +1600,14 @@ export class Game {
     } else if (r < comets + 0.45) {
       // Gem arc: a short line of gems, sometimes capped with a power-up.
       for (let i = 0; i < 3; i++) this.addObj(a + i * 0.22, lane, 'gem');
-      if (Math.random() < 0.15) this.addObj(a + 0.66, lane, 'power', { power: this.pickPower() });
+      if (Math.random() < 0.15 * this.luck) this.addObj(a + 0.66, lane, 'power', { power: this.pickPower() });
       gap += 0.6;
     } else {
       // Single hazard, with a gem or power-up in a safe lane. On three orbits only
       // one orbit is ever blocked, so any tap (in or out) is always an escape.
       this.hazard(a, lane);
       const q = Math.random();
-      if (q < 0.1) this.addObj(a, other, 'power', { power: this.pickPower() });
+      if (q < 0.1 * this.luck) this.addObj(a, other, 'power', { power: this.pickPower() });
       else if (q < 0.45) this.addObj(a, other, 'gem');
     }
     this.nextSpawn = a + gap;
@@ -1333,6 +1625,11 @@ export class Game {
     } else {
       this.addObj(a, lane, 'rock');
     }
+  }
+
+  /** Power-up spawn multiplier from the Lucky Finds upgrade. */
+  private get luck(): number {
+    return 1 + 0.2 * upgradeLevel(this.profile, 'luck');
   }
 
   private pickPower(): PowerKind {
@@ -1503,7 +1800,7 @@ export class Game {
       for (const o of this.objs) this.drawObj(ctx, o, S);
       if (inRun && this.boss) this.drawBoss(ctx, this.boss, S);
     }
-    if (this.state !== 'over' && this.state !== 'shop' && this.state !== 'missions') this.drawPlayer(ctx, S);
+    if (this.state === 'menu' || this.state === 'playing' || this.state === 'paused') this.drawPlayer(ctx, S);
     this.drawParticles(ctx, S);
     this.drawTexts(ctx, S);
     ctx.restore();
@@ -2072,6 +2369,204 @@ export class Game {
     }
   }
 
+  private drawGalaxy(ctx: CanvasRenderingContext2D, btns: Btn[]): void {
+    const { cx, base } = this;
+    const p = this.profile;
+    const top = this.safe.top + 36;
+    text(ctx, 'GALAXY', cx, top, base * 0.065, '#ffffff', 900);
+    this.wallet(ctx, this.w - this.safe.right - 16, top);
+
+    const pending = pendingGems(p);
+    const ca = btns.find((b) => b.id === 'collectAll')!;
+    roundRect(ctx, ca.x, ca.y, ca.w, ca.h, ca.h / 2);
+    ctx.fillStyle = pending > 0 ? '#ffd166' : 'rgba(255,255,255,0.1)';
+    ctx.fill();
+    text(ctx, pending > 0 ? `COLLECT ALL  +${pending}` : 'STATIONS PRODUCING…', cx, ca.y + ca.h / 2 + 1, 16, pending > 0 ? '#0b0d1f' : 'rgba(255,255,255,0.6)', 900);
+
+    const { nodes, panel } = this.galaxyLayout();
+    // The route between planets.
+    ctx.setLineDash([5, 7]);
+    ctx.lineDashOffset = -this.time * 10;
+    ctx.lineWidth = 2;
+    for (let i = 1; i < nodes.length; i++) {
+      ctx.strokeStyle = p.discovered.includes(i) ? 'rgba(125, 249, 255, 0.45)' : 'rgba(255,255,255,0.12)';
+      ctx.beginPath();
+      ctx.moveTo(nodes[i - 1].x, nodes[i - 1].y);
+      ctx.lineTo(nodes[i].x, nodes[i].y);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+
+    nodes.forEach((n, i) => {
+      const found = p.discovered.includes(i);
+      const st = p.stations[i];
+      if (i === this.selectedPlanet) {
+        ctx.strokeStyle = '#7df9ff';
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.arc(n.x, n.y, n.r * 1.35 + Math.sin(this.time * 4) * 2, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      if (found) {
+        ctx.save();
+        ctx.translate(n.x, n.y);
+        this.drawPlanet(ctx, n.r / 0.3, PLANETS[i]);
+        ctx.restore();
+      } else {
+        ctx.fillStyle = 'rgba(255,255,255,0.08)';
+        ctx.beginPath();
+        ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
+        ctx.fill();
+        text(ctx, '?', n.x, n.y + 1, n.r, 'rgba(255,255,255,0.35)', 900);
+      }
+      if (st) {
+        // Station: a small satellite on the planet's shoulder, with a fill bar.
+        const sx = n.x + n.r * 0.85;
+        const sy = n.y - n.r * 0.85;
+        ctx.fillStyle = '#d9dcf0';
+        ctx.fillRect(sx - 5, sy - 3, 10, 6);
+        ctx.fillStyle = '#7df9ff';
+        ctx.fillRect(sx - 13, sy - 2, 7, 4);
+        ctx.fillRect(sx + 6, sy - 2, 7, 4);
+        const frac = st.stored / stationCap(i, st.level);
+        progressBar(ctx, n.x - n.r, n.y + n.r + 22, n.r * 2, 5, frac, frac >= 1 ? '#ff8a8a' : '#ffd166');
+        if (frac >= 1) text(ctx, 'FULL', n.x + n.r + 18, n.y + n.r + 24, 10, '#ff8a8a', 900);
+      }
+      text(ctx, found ? PLANETS[i].name : '???', n.x, n.y + n.r + 11, 12, found ? '#ffffff' : 'rgba(255,255,255,0.4)', 800);
+    });
+
+    // Detail panel for the selected planet.
+    const i = this.selectedPlanet;
+    const pl = PLANETS[i];
+    const st = p.stations[i];
+    roundRect(ctx, panel.x, panel.y, panel.w, panel.h, 18);
+    ctx.fillStyle = 'rgba(255,255,255,0.08)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    const px = panel.x + 18;
+    if (!p.discovered.includes(i)) {
+      text(ctx, 'UNKNOWN PLANET', px, panel.y + 30, 17, '#ffffff', 900, 'left');
+      text(ctx, 'Reach this planet in a run to discover it.', px, panel.y + 58, 13, 'rgba(255,255,255,0.7)', 600, 'left');
+      text(ctx, 'Then build a station here to earn gems.', px, panel.y + 78, 13, 'rgba(255,255,255,0.7)', 600, 'left');
+    } else if (!st) {
+      const info = STATION_INFO[i];
+      text(ctx, pl.name.toUpperCase(), px, panel.y + 30, 17, '#ffffff', 900, 'left');
+      text(ctx, `Build a station to earn ${stationRate(i, 1)} gems/hour,`, px, panel.y + 58, 13, 'rgba(255,255,255,0.75)', 600, 'left');
+      text(ctx, `even while you're not playing.`, px, panel.y + 77, 13, 'rgba(255,255,255,0.75)', 600, 'left');
+      const b = btns.find((x) => x.id === 'build')!;
+      button(ctx, b, `BUILD STATION · ${info.build}`, p.gems >= info.build);
+    } else {
+      const rate = stationRate(i, st.level);
+      const cap = stationCap(i, st.level);
+      text(ctx, `${pl.name.toUpperCase()} STATION`, px, panel.y + 26, 16, '#ffffff', 900, 'left');
+      text(ctx, `LV ${st.level}`, panel.x + panel.w - 18, panel.y + 26, 16, '#7df9ff', 900, 'right');
+      text(ctx, `${rate} gems/hour · holds ${cap} (${Math.round(cap / rate)} h)`, px, panel.y + 50, 13, 'rgba(255,255,255,0.7)', 600, 'left');
+      progressBar(ctx, px, panel.y + 66, panel.w - 36, 10, st.stored / cap, st.stored >= cap ? '#ff8a8a' : '#ffd166');
+      text(ctx, `${Math.floor(st.stored)} / ${cap}`, panel.x + panel.w - 18, panel.y + 90, 12, 'rgba(255,255,255,0.6)', 700, 'right');
+      const c = btns.find((x) => x.id === 'collectOne')!;
+      button(ctx, c, `COLLECT ${Math.floor(st.stored)}`, Math.floor(st.stored) > 0);
+      const u = btns.find((x) => x.id === 'upgradeStation')!;
+      if (st.level >= MAX_STATION_LEVEL) button(ctx, u, 'MAX LEVEL', false);
+      else button(ctx, u, `UPGRADE · ${upgradeCost(i, st.level)}`, false);
+    }
+  }
+
+  private drawHangar(ctx: CanvasRenderingContext2D, btns: Btn[]): void {
+    const { cx, base } = this;
+    const p = this.profile;
+    const top = this.safe.top + 36;
+    text(ctx, 'HANGAR', cx, top, base * 0.065, '#ffffff', 900);
+    this.wallet(ctx, this.w - this.safe.right - 16, top);
+    text(ctx, 'Permanent upgrades for every run', cx, this.safe.top + 80, base * 0.038, 'rgba(255,255,255,0.65)', 600);
+    const width = Math.min(this.w - 32, 460);
+    const left = (this.w - width) / 2;
+    UPGRADES.forEach((u) => {
+      const b = btns.find((x) => x.id === `upg:${u.id}`)!;
+      const rowH = Math.min(92, (this.h - this.safe.bottom - 20 - (this.safe.top + 110)) / UPGRADES.length);
+      const ry = b.y + b.h / 2 - (rowH - 8) / 2;
+      const lvl = upgradeLevel(p, u.id);
+      const maxed = lvl >= u.costs.length;
+      roundRect(ctx, left, ry, width, rowH - 8, 14);
+      ctx.fillStyle = 'rgba(255,255,255,0.07)';
+      ctx.fill();
+      text(ctx, u.name, left + 14, ry + 20, 15, '#ffffff', 900, 'left');
+      // Description, wrapped to two lines if needed.
+      ctx.font = `600 12px ${FONT}`;
+      const maxW = width - 140;
+      const words = u.desc.split(' ');
+      const lines: string[] = [''];
+      for (const wd of words) {
+        const t = lines[lines.length - 1] ? lines[lines.length - 1] + ' ' + wd : wd;
+        if (ctx.measureText(t).width > maxW && lines[lines.length - 1]) lines.push(wd);
+        else lines[lines.length - 1] = t;
+      }
+      lines.slice(0, 2).forEach((ln, k) => text(ctx, ln, left + 14, ry + 40 + k * 15, 12, 'rgba(255,255,255,0.65)', 600, 'left'));
+      // Level pips.
+      for (let k = 0; k < u.costs.length; k++) {
+        ctx.fillStyle = k < lvl ? '#7df9ff' : 'rgba(255,255,255,0.15)';
+        roundRect(ctx, left + 14 + k * 18, ry + rowH - 18, 14, 4, 2);
+        ctx.fill();
+      }
+      if (maxed) {
+        text(ctx, lvl > 1 || u.costs.length > 1 ? 'MAXED' : 'OWNED', b.x + b.w / 2, b.y + b.h / 2, 14, '#7dff6b', 900);
+      } else {
+        roundRect(ctx, b.x, b.y, b.w, b.h, b.h / 2);
+        ctx.fillStyle = p.gems >= u.costs[lvl] ? '#ffd166' : 'rgba(255,255,255,0.1)';
+        ctx.fill();
+        gemAmount(ctx, String(u.costs[lvl]), b.x + b.w / 2, b.y + b.h / 2 + 1, 16, p.gems >= u.costs[lvl] ? '#0b0d1f' : 'rgba(255, 209, 102, 0.6)');
+      }
+    });
+  }
+
+  private drawModal(ctx: CanvasRenderingContext2D): void {
+    const m = this.modals[0];
+    const r = this.modalRect();
+    this.dim(ctx, 0.7);
+    roundRect(ctx, r.x, r.y, r.w, r.h, 22);
+    const g = ctx.createLinearGradient(0, r.y, 0, r.y + r.h);
+    g.addColorStop(0, '#2a1d63');
+    g.addColorStop(1, '#151033');
+    ctx.fillStyle = g;
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(125, 249, 255, 0.4)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    const cx = r.x + r.w / 2;
+    const btns = this.modalButtons();
+    if (m.kind === 'daily') {
+      text(ctx, 'DAILY REWARD', cx, r.y + 40, 24, '#ffffff', 900);
+      text(ctx, m.day === 1 && this.profile.daily.streak > 0 ? 'Streak reset: come back every day!' : `Day ${m.day} of 7 · come back tomorrow for more`, cx, r.y + 68, 13, 'rgba(255,255,255,0.7)', 600);
+      // Seven day tiles.
+      const tw = (r.w - 36 - 6 * 6) / 7;
+      DAILY_REWARDS.forEach((amt, k) => {
+        const x = r.x + 18 + k * (tw + 6);
+        const y = r.y + 96;
+        const day = k + 1;
+        const past = day < m.day;
+        const today = day === m.day;
+        roundRect(ctx, x, y, tw, 74, 10);
+        ctx.fillStyle = today ? '#ffd166' : past ? 'rgba(125, 255, 107, 0.2)' : 'rgba(255,255,255,0.08)';
+        ctx.fill();
+        text(ctx, `D${day}`, x + tw / 2, y + 14, 11, today ? '#0b0d1f' : 'rgba(255,255,255,0.6)', 800);
+        if (past) text(ctx, '✓', x + tw / 2, y + 40, 18, '#7dff6b', 900);
+        else gemIcon(ctx, x + tw / 2, y + 38, day === 7 ? 11 : 8);
+        text(ctx, String(amt), x + tw / 2, y + 61, 11, today ? '#0b0d1f' : '#ffd166', 900);
+      });
+      text(ctx, `+${DAILY_REWARDS[m.day - 1]} gems`, cx, r.y + 205, 22, '#ffd166', 900);
+      button(ctx, btns[0], 'CLAIM', true);
+    } else {
+      text(ctx, 'WELCOME BACK!', cx, r.y + 40, 24, '#ffffff', 900);
+      text(ctx, 'Your stations kept working while you were away', cx, r.y + 70, 13, 'rgba(255,255,255,0.7)', 600);
+      gemAmount(ctx, String(m.gems), cx, r.y + 130, 44);
+      const c = btns.find((b) => b.id === 'collectWelcome')!;
+      const d = btns.find((b) => b.id === 'collectWelcome2x');
+      if (d) this.adButton(ctx, d, `COLLECT x2 (+${m.gems * 2})`);
+      button(ctx, c, `COLLECT ${m.gems}`, !d);
+    }
+  }
+
   private drawShip(ctx: CanvasRenderingContext2D, x: number, y: number, r: number, skinId: string, trail: { x: number; y: number }[], alpha = 1): void {
     const skin = skinById(skinId);
     const n = trail.length;
@@ -2159,7 +2654,7 @@ export class Game {
   // ------------------------------------------------------------------ HUD & menus
 
   private drawHud(ctx: CanvasRenderingContext2D): void {
-    const btns = this.buttons();
+    const btns = this.screenButtons();
     const btn = (id: string) => btns.find((b) => b.id === id);
     const { cx, base } = this;
 
@@ -2182,14 +2677,23 @@ export class Game {
         this.dim(ctx, 0.82);
         this.drawMissions(ctx);
         break;
+      case 'galaxy':
+        this.dim(ctx, 0.85);
+        this.drawGalaxy(ctx, btns);
+        break;
+      case 'hangar':
+        this.dim(ctx, 0.85);
+        this.drawHangar(ctx, btns);
+        break;
     }
-    if (this.state === 'shop' || this.state === 'missions') this.iconButton(ctx, btn('back')!, 'back');
+    if (this.state === 'shop' || this.state === 'missions' || this.state === 'galaxy' || this.state === 'hangar') this.iconButton(ctx, btn('back')!, 'back');
+    if (this.modalOpen) this.drawModal(ctx);
 
     // Toasts sit just above the orbit.
     if (this.toast.life > 0) {
       const a = Math.min(1, this.toast.life * 3);
       const y =
-        this.state === 'shop'
+        this.state === 'shop' || this.state === 'hangar' || this.state === 'galaxy'
           ? this.h - this.safe.bottom - 14
           : this.state === 'over'
             ? this.h - this.safe.bottom - Math.min(56, base * 0.14) - 56
@@ -2287,14 +2791,32 @@ export class Game {
     text(ctx, 'ORBIT DASH', cx, titleY, base * 0.13, '#ffffff', 900);
     text(ctx, this.best > 0 ? `BEST ${this.best}` : 'Tap to switch orbits', cx, titleY + base * 0.085, base * 0.042, this.best > 0 ? '#ffd166' : 'rgba(255,255,255,0.65)', 700);
 
-    const pulse = 0.55 + 0.45 * Math.sin(this.time * 4);
-    const shop = btn('shop')!;
-    const playY = (this.cy + this.scale + shop.y) / 2;
-    text(ctx, 'TAP TO PLAY', cx, playY, base * 0.055, `rgba(255,255,255,${pulse})`, 800);
+    // Pilot rank.
+    const p = this.profile;
+    const rankY = titleY + base * 0.15;
+    text(ctx, `PILOT RANK ${p.rank}`, cx, rankY, base * 0.034, '#7df9ff', 800);
+    progressBar(ctx, cx - 70, rankY + 11, 140, 5, p.xp / xpToNext(p.rank), '#7df9ff');
 
-    button(ctx, shop, 'SHOP', false);
-    const ms = btn('missions')!;
-    button(ctx, ms, 'MISSIONS', false);
+    const pulse = 0.55 + 0.45 * Math.sin(this.time * 4);
+    const galaxy = btn('galaxy')!;
+    const playY = (this.cy + this.scale + galaxy.y) / 2;
+    if (galaxy.y - (this.cy + this.scale) > 34) text(ctx, 'TAP TO PLAY', cx, playY, base * 0.05, `rgba(255,255,255,${pulse})`, 800);
+
+    button(ctx, galaxy, 'GALAXY', false);
+    button(ctx, btn('hangar')!, 'HANGAR', false);
+    button(ctx, btn('shop')!, 'SHOP', false);
+    button(ctx, btn('missions')!, 'MISSIONS', false);
+    // Badge: gems waiting in the stations.
+    const pending = pendingGems(p);
+    if (pending > 0) {
+      const label = `+${pending}`;
+      ctx.font = `900 12px ${FONT}`;
+      const bw = ctx.measureText(label).width + 16;
+      roundRect(ctx, galaxy.x + galaxy.w - bw + 6, galaxy.y - 8, bw, 20, 10);
+      ctx.fillStyle = '#ffd166';
+      ctx.fill();
+      text(ctx, label, galaxy.x + galaxy.w - bw / 2 + 6, galaxy.y + 2, 12, '#0b0d1f', 900);
+    }
   }
 
   private drawPlayHud(ctx: CanvasRenderingContext2D, btn: (id: string) => Btn | undefined): void {
@@ -2420,6 +2942,13 @@ export class Game {
     }
     y += base * 0.09;
     gemAmount(ctx, `+${this.stats.gems * (this.doubledGems ? 2 : 1)}`, cx, y, base * 0.05);
+    if (this.finalized) {
+      y += base * 0.07;
+      const pr = this.profile;
+      const extra = this.discoveries.length ? `  ·  NEW: ${this.discoveries.join(', ').toUpperCase()}` : '';
+      text(ctx, `+${this.runXp} XP · RANK ${pr.rank}${extra}`, cx, y, base * 0.036, '#7df9ff', 800);
+      progressBar(ctx, cx - 70, y + 11, 140, 5, pr.xp / xpToNext(pr.rank), '#7df9ff');
+    }
 
     // Missions
     y += base * 0.08;
