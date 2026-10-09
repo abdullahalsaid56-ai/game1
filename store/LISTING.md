@@ -19,20 +19,23 @@ If that name is taken, try `Orbit Dash – Space Arcade` or `Orbit Dash`.
 ```
 One tap. Two orbits. How long can you survive?
 
-Your ship races around a glowing planet. Tap anywhere to jump between the inner and outer orbit. Dodge the red rocks, grab the gold gems, and keep going as the ship gets faster and faster.
+Your ship races around a glowing planet. Tap anywhere to jump between the inner and outer orbit. Dodge the red rocks and incoming comets, grab the gold gems, and keep going as the ship gets faster and faster.
 
 Simple to learn, hard to master. It's perfect for a quick break.
 
 FEATURES
 • One-tap controls: play with a single thumb
-• Gets faster every 20 points, with new obstacle patterns as you improve
-• Collect gems for bonus points
+• Power-ups: Shield, Gem Magnet, Slow-Mo and Double Points
+• Combo multiplier up to x5: chain gems to multiply every point
+• Close-call bonuses for last-second dodges
+• Six zones, each with its own colours, and the ship gets faster in every one
+• Missions that reward you with gems
+• Unlock six ship skins with unique trails
 • Satisfying haptics and retro sound effects
-• Beat your best score
 • Works offline, so you can play anywhere
 • No ads, no accounts, no data collection
 
-Can you beat 100?
+Can you reach Zone 6?
 ```
 
 ---
@@ -49,7 +52,7 @@ Can you beat 100?
 | Secondary category | Games → Casual |
 | Price | Free |
 | Keywords (100) | `arcade,one tap,space,planet,galaxy,dodge,reflex,casual,endless,offline,hyper casual,gems` |
-| Promotional text (170) | One tap is all it takes. Jump between orbits, dodge rocks and chase your best score. No ads, no sign-up, works offline. |
+| Promotional text (170) | NEW: power-ups, missions, ship skins and comets! Jump between orbits, chain gems for a x5 combo and chase your best score. |
 | Copyright | 2026 Abdullah Alsaid |
 
 **Screenshots** (in `store/screenshots/`):

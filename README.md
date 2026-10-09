@@ -1,17 +1,20 @@
 # Orbit Dash
 
-A one-tap arcade game for iOS and Android. Your ship orbits a planet. **Tap to jump between the inner and outer orbit**, dodge the red rocks and grab the gold gems. The ship speeds up every 20 points.
+A one-tap arcade game for iOS and Android. Your ship orbits a planet. **Tap to jump between the inner and outer orbit**, dodge rocks and comets, grab gems and power-ups, complete missions and unlock new ships.
 
 Built with **TypeScript + HTML5 Canvas** (no game engine and no image or audio files: all graphics are drawn in code and all sounds are synthesized) and packaged as native apps with **[Capacitor](https://capacitorjs.com)**.
 
 ## Features
 
 - One-tap controls with haptic feedback on native devices
-- Difficulty ramps up with speed levels and obstacle patterns (single rocks, gem arcs, zig-zags)
-- Best score saved on device
-- Sound toggle, pause button, auto-pause when the app goes to the background, Android back button support
-- Handles notches and safe areas, scales to any phone or tablet
-- Works offline. No ads, no tracking, no network access.
+- **Power-ups:** Shield (absorbs one hit), Magnet (pulls in gems from both orbits), Slow-Mo, Double Points
+- **Combo multiplier** up to x5 for chaining gems, plus **close-call** bonuses for last-second dodges
+- **Comets** that fly at you, with a warning marker where they'll cross your path
+- **Zones:** the planet and sky change color as you progress, and the ship speeds up
+- **Missions** (3 at a time, getting harder) that reward gems
+- **Skins shop:** spend gems on 6 ships with unique trails
+- First-run tutorial hint, sound toggle, pause, auto-pause in the background, Android back button
+- Progress saved on device. Works offline. No ads, no tracking, no network access.
 
 Website, privacy policy and support pages are in `docs/`. Store listing text and graphics are in `store/`.
 
@@ -20,7 +23,10 @@ Website, privacy policy and support pages are in `docs/`. Store listing text and
 ```
 src/
   main.ts      canvas setup, game loop, input
-  game.ts      gameplay, rendering, HUD
+  game.ts      gameplay, rendering, HUD and menus
+  content.ts   skins, zone themes, power-ups, missions
+  profile.ts   saved progress (best, gems, skins, missions)
+  ui.ts        canvas drawing helpers (buttons, icons, bars)
   audio.ts     synthesized sound effects (Web Audio)
   native.ts    Capacitor plugins: haptics, storage, status bar, lifecycle
 assets/        source icon and splash images (used to generate native assets)

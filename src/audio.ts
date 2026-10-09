@@ -60,6 +60,36 @@ export class Sfx {
     [0, 4, 7, 12].forEach((n, i) => this.tone(440 * Math.pow(2, n / 12), 440 * Math.pow(2, n / 12), 0.12, 'triangle', 0.2, i * 0.07));
   }
 
+  powerUp(): void {
+    [0, 7, 12, 19].forEach((n, i) => this.tone(523 * Math.pow(2, n / 12), 523 * Math.pow(2, (n + 2) / 12), 0.1, 'sine', 0.22, i * 0.05));
+  }
+
+  shieldBreak(): void {
+    this.tone(900, 200, 0.25, 'triangle', 0.3);
+    this.tone(600, 120, 0.3, 'square', 0.08, 0.03);
+  }
+
+  closeCall(): void {
+    this.tone(880, 1320, 0.07, 'triangle', 0.18);
+  }
+
+  buy(): void {
+    this.tone(660, 990, 0.08, 'square', 0.12);
+    this.tone(990, 1480, 0.12, 'sine', 0.2, 0.07);
+  }
+
+  mission(): void {
+    [0, 4, 7, 12, 16].forEach((n, i) => this.tone(587 * Math.pow(2, n / 12), 587 * Math.pow(2, n / 12), 0.14, 'triangle', 0.2, i * 0.08));
+  }
+
+  denied(): void {
+    this.tone(200, 140, 0.15, 'square', 0.12);
+  }
+
+  click(): void {
+    this.tone(700, 800, 0.04, 'triangle', 0.15);
+  }
+
   crash(): void {
     if (!this.enabled || !this.ctx || !this.master) return;
     const t = this.ctx.currentTime;
