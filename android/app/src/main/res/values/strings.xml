@@ -4,4 +4,6 @@
     <string name="title_activity_main">Orbit Dash</string>
     <string name="package_name">com.abdullahalsaid.orbitdash</string>
     <string name="custom_url_scheme">com.abdullahalsaid.orbitdash</string>
+    <!-- AdMob app ID. This is Google's TEST app ID: replace it with yours from admob.google.com before release. -->
+    <string name="admob_app_id">ca-app-pub-3940256099942544~3347511713</string>
 </resources>

@@ -1,17 +1,31 @@
 # Orbit Dash
 
-A one-tap arcade game for iOS and Android. Your ship orbits a planet. **Tap to jump between the inner and outer orbit**, dodge the red rocks and grab the gold gems. The ship speeds up every 20 points.
+A one-tap arcade game for iOS and Android. Your ship orbits a planet. **Tap to jump between the inner and outer orbit**, hop between six planets through warp gates, survive boss fights, grab gems and power-ups, complete missions and unlock new ships.
 
 Built with **TypeScript + HTML5 Canvas** (no game engine and no image or audio files: all graphics are drawn in code and all sounds are synthesized) and packaged as native apps with **[Capacitor](https://capacitorjs.com)**.
 
 ## Features
 
 - One-tap controls with haptic feedback on native devices
-- Difficulty ramps up with speed levels and obstacle patterns (single rocks, gem arcs, zig-zags)
-- Best score saved on device
-- Sound toggle, pause button, auto-pause when the app goes to the background, Android back button support
-- Handles notches and safe areas, scales to any phone or tablet
-- Works offline. No ads, no tracking, no network access.
+- **Power-ups:** Shield (absorbs one hit), Magnet (pulls in gems from both orbits), Slow-Mo, Double Points
+- **Combo multiplier** up to x5 for chaining gems, plus **close-call** bonuses for last-second dodges
+- **Comets** that fly at you, with a warning marker where they'll cross your path
+- **Planet hopping:** each planet ends with a **warp gate**; flying through it starts a short **warp flight** (dodge debris left/right) to the next planet. The ship gets faster on every planet, and the six planets loop.
+  | Planet | Twist |
+  |---|---|
+  | Home | Classic rocks |
+  | Lava World | Solar flares: wide hazards that glow as a warning, then erupt as you pass |
+  | Ice World | Slippery, slower orbit switching. **Boss: Space Worm** |
+  | Gas Giant | Three orbits; each tap bounces one orbit in or out (arrow shows the direction) |
+  | Black Hole | Orbits shrink as you go; rocks drift towards you |
+  | Pulsar | Comet storm. **Boss: Laser UFO** |
+- **Bosses** (20 s each, survive to win +10 gems): the **Space Worm** circles against you and only changes orbit on the far side of the planet, so it's always dodgeable; the **Laser UFO** fires beams across one orbit, each marked by a dashed red line first
+- **Missions** (3 at a time, getting harder) that reward gems
+- **Skins shop:** spend gems on 6 ships with unique trails
+- First-run tutorial hint, sound toggle, pause, auto-pause in the background, Android back button
+- **Ads (Google AdMob):** optional rewarded ads to *continue a run* (once per run) or *double your gems*, plus a full-screen ad between games (at most every 3rd game, never in a player's first 3 games, at least 90 s apart)
+- **Remove Ads** one-time purchase ($1.99) with Restore Purchases; the consent popup (EU/UK) and iOS tracking prompt are handled
+- Progress saved on device. Plays offline (ads just don't show).
 
 Website, privacy policy and support pages are in `docs/`. Store listing text and graphics are in `store/`.
 
@@ -20,7 +34,11 @@ Website, privacy policy and support pages are in `docs/`. Store listing text and
 ```
 src/
   main.ts      canvas setup, game loop, input
-  game.ts      gameplay, rendering, HUD
+  game.ts      gameplay, rendering, HUD and menus
+  content.ts   skins, zone themes, power-ups, missions
+  profile.ts   saved progress (best, gems, skins, missions)
+  ui.ts        canvas drawing helpers (buttons, icons, bars)
+  monetize.ts  AdMob ads + Remove Ads purchase (ad IDs live here)
   audio.ts     synthesized sound effects (Web Audio)
   native.ts    Capacitor plugins: haptics, storage, status bar, lifecycle
 assets/        source icon and splash images (used to generate native assets)
@@ -127,6 +145,26 @@ npm run ios            # builds the game and opens Xcode
 6. Review usually takes 1–3 days. If you're rejected, the message explains why, and most fixes are small.
 
 > Apple occasionally rejects very simple games under guideline 4.2 (minimum functionality). If that happens, adding Game Center leaderboards is the usual fix.
+
+## Ads and in-app purchases: switching to real ads
+
+The game ships with **Google's test ads**, which are safe to tap during development. Never tap your own real ads, because AdMob can ban your account for it. In `npm run dev`, the browser shows a simulated "TEST AD" screen instead.
+
+Before releasing:
+
+1. **Create an AdMob account** at https://admob.google.com (free), and add a payment method so you can get paid.
+2. **Add two apps** in AdMob (Apps → Add app): one Android, one iOS. You can link them to the store listings later, once they're published.
+3. In each app, **create two ad units**: *Interstitial* and *Rewarded* (reward amount 1, item "continue").
+4. Put the IDs into the project:
+   - `src/monetize.ts`: replace the four ad unit IDs in `AD_UNITS` and set `USE_TEST_ADS = false`
+   - `android/app/src/main/res/values/strings.xml`: `admob_app_id` → your **Android app ID** (contains a `~`)
+   - `ios/App/App/Info.plist`: `GADApplicationIdentifier` → your **iOS app ID**
+5. **Privacy & messaging** (AdMob → Privacy & messaging): create a **GDPR message** for the EEA/UK and an **IDFA explainer** for iOS. The game already shows them; AdMob decides when.
+6. **app-ads.txt:** AdMob verifies you own the app through a file at the root of the developer website in your store listing. Create a public GitHub repo named exactly `abdullahalsaid56-ai.github.io`, add a file `app-ads.txt` containing the line AdMob shows you (like `google.com, pub-1234567890123456, DIRECT, f08c47fec0942fa0`), and enable Pages on it. Then use `https://abdullahalsaid56-ai.github.io` as the developer website in both stores.
+7. **Create the `remove_ads` product** in Play Console and App Store Connect. Step-by-step instructions are in `store/LISTING.md`.
+8. Fill in the **Data safety** (Play) and **App Privacy** (Apple) forms with the AdMob answers in `store/LISTING.md`.
+
+To test real purchases without paying: on Android, add your Gmail under Play Console → Settings → **License testing**; on iOS, use a **Sandbox** tester (App Store Connect → Users and Access → Sandbox).
 
 ## Releasing updates
 
